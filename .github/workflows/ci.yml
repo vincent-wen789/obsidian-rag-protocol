@@ -17,11 +17,15 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Verify script compiles
-        run: python3 -m py_compile rebuild-vault-index.py
+      - name: Verify scripts compile
+        run: |
+          python3 -m py_compile rebuild-vault-index.py
+          python3 -m py_compile orp_reader.py
 
       - name: Test --help
-        run: python3 rebuild-vault-index.py --help
+        run: |
+          python3 rebuild-vault-index.py --help
+          python3 orp_reader.py --help
 
       - name: Build index from example fixture
         run: |
@@ -103,7 +107,59 @@ jobs:
           print('OK: rag_exclude works')
           "
 
+      - name: Reader — fresh index for reader tests
+        run: |
+          rm -f /tmp/reader-index.json
+          python3 rebuild-vault-index.py \
+            --vault examples \
+            --output /tmp/reader-index.json \
+            --scan notes:cc
+
+      - name: Reader — status reports entry count and freshness
+        run: |
+          OUT=$(python3 orp_reader.py --index /tmp/reader-index.json status)
+          echo "$OUT"
+          echo "$OUT" | grep -qE "^[0-9]+ entries.*fresh" || (echo "FAIL: status output unexpected" && exit 1)
+
+      - name: Reader — match returns expected entry
+        run: |
+          OUT=$(python3 orp_reader.py --index /tmp/reader-index.json match "coinbase japan")
+          echo "$OUT"
+          echo "$OUT" | grep -q "coinbase-japan-analysis" || (echo "FAIL: expected coinbase match" && exit 1)
+
+      - name: Reader — CJK token matches
+        run: |
+          OUT=$(python3 orp_reader.py --index /tmp/reader-index.json match "撤退")
+          echo "$OUT"
+          echo "$OUT" | grep -q "coinbase-japan-analysis" || (echo "FAIL: CJK token did not match" && exit 1)
+
+      - name: Reader — no match returns exit 1
+        run: |
+          set +e
+          python3 orp_reader.py --index /tmp/reader-index.json match "totally unrelated zzz"
+          RC=$?
+          set -e
+          test "$RC" = "1" || (echo "FAIL: expected exit 1 on no match, got $RC" && exit 1)
+
+      - name: Reader — missing index returns exit 2
+        run: |
+          set +e
+          python3 orp_reader.py --index /tmp/does-not-exist.json status
+          RC=$?
+          set -e
+          test "$RC" = "2" || (echo "FAIL: expected exit 2 on missing index, got $RC" && exit 1)
+
+      - name: Reader — corrupted index returns exit 3
+        run: |
+          echo "garbage{{{" > /tmp/bad.json
+          set +e
+          python3 orp_reader.py --index /tmp/bad.json status
+          RC=$?
+          set -e
+          test "$RC" = "3" || (echo "FAIL: expected exit 3 on corrupted index, got $RC" && exit 1)
+
       - name: Check file encoding
         run: |
-          python3 -c "open('rebuild-vault-index.py', encoding='utf-8').read()" || (echo "Bad encoding in script" && exit 1)
+          python3 -c "open('rebuild-vault-index.py', encoding='utf-8').read()" || (echo "Bad encoding in indexer" && exit 1)
+          python3 -c "open('orp_reader.py', encoding='utf-8').read()" || (echo "Bad encoding in reader" && exit 1)
           python3 -c "open('examples/vault-index.json', encoding='utf-8').read()" || (echo "Bad encoding in examples" && exit 1)

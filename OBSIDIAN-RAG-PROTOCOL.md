@@ -287,7 +287,12 @@ All ORP-related agent skills must be pinned via the agent's curator system to pr
 
 ## 9. Reference Implementation
 
-See `rebuild-vault-index.py` in this repository. It implements all sections of this protocol in a single-file Python script with no external dependencies beyond stdlib.
+The repository ships two reference implementations, both single-file, both stdlib-only:
+
+- **`rebuild-vault-index.py`** — the indexer side. Implements §1 (vault index), §2 (indexing algorithm), §3 (alias resolution), §7 (incremental rebuild). Run as a cron job.
+- **`orp_reader.py`** — the reader side. Implements §4.2 (matching algorithm), §4.3 (error handling), staleness detection (Rule 4), §3.2 (scalar aliases tolerance). Usable as a Python library (`from orp_reader import VaultIndex`) or as a CLI (`python3 orp_reader.py match "..."`). Drop it into any agent that doesn't yet have its own reader.
+
+Together they cover both ends of the protocol. Implementations in other languages are welcome — use these as the conformance target.
 
 ---
 

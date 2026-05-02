@@ -210,6 +210,27 @@ The protocol is agent-agnostic. All you need:
 2. **A system prompt rule** — "first tool call = read vault-index.json on non-trivial queries"
 3. **A cron job** — rebuild the index daily
 
+#### Reader reference
+
+`orp_reader.py` ships in this repo as a reference implementation of the reader side of the protocol — alias matching (§4.2), staleness check, error handling. Use it as a library:
+
+```python
+from orp_reader import VaultIndex
+idx = VaultIndex.load("~/.hermes/vault-index.json")
+for entry_id, entry, matched_alias in idx.match("Coinbase Japan"):
+    print(entry["path"])  # then read_file(entry["path"]) to get full note
+```
+
+Or as a CLI for ad-hoc shell glue:
+
+```bash
+python3 orp_reader.py status                      # exit 0 / 2 / 3
+python3 orp_reader.py match "Coinbase Japan"      # tab-separated entry_id, path, matched alias
+python3 orp_reader.py get coinbase-japan-analysis # full entry as JSON
+```
+
+Stdlib only. Drop it next to your agent's tooling and wire the match output into whatever read-file call your agent uses.
+
 ---
 
 ## Verifying It Works
