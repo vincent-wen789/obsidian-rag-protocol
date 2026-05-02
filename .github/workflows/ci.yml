@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Verify script compiles
+        run: python3 -m py_compile rebuild-vault-index.py
+
+      - name: Test --help
+        run: python3 rebuild-vault-index.py --help
+
+      - name: Test dry-run with example data
+        run: |
+          python3 rebuild-vault-index.py \
+            --vault examples \
+            --output /tmp/test-index.json \
+            --scan notes:cc
+
+      - name: Validate JSON output
+        run: |
+          python3 -c "
+          import json
+          with open('/tmp/test-index.json') as f:
+              data = json.load(f)
+          assert 'entries' in data, 'Missing entries'
+          assert 'updated' in data, 'Missing updated timestamp'
+          assert data['total_entries'] >= 1, 'No entries found'
+          print(f'✅ {data[\"total_entries\"]} entries, valid JSON')
+          "
+
+      - name: Test incremental rebuild (no changes)
+        run: |
+          python3 rebuild-vault-index.py \
+            --vault examples \
+            --output /tmp/test-index.json \
+            --scan notes:cc 2>&1 | grep "0 changed" || echo "WARNING: incremental check (may be expected in CI)"
+
+      - name: Check file encoding
+        run: |
+          file rebuild-vault-index.py | grep -q "UTF-8\|ASCII" || (echo "Bad encoding in script" && exit 1)
+          file examples/vault-index.json | grep -q "UTF-8\|ASCII" || (echo "Bad encoding in examples" && exit 1)

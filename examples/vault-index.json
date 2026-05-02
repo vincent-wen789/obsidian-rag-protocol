@@ -1,0 +1,45 @@
+{
+  "version": "1.0",
+  "updated": "2026-05-02T09:00:00+09:00",
+  "scan_dirs": {
+    "wiki/career": "cc",
+    "wiki/projects": "cc",
+    "hermes-knowledge/job-search": "hermes"
+  },
+  "total_entries": 3,
+  "entries": [
+    {
+      "_content_hash": "a1b2c3d4...",
+      "path": "wiki/career/company-research.md",
+      "title": "Coinbase Japan — 市場撤退分析",
+      "summary_points": ["Coinbase Japan 2026年撤退決定", "規制環境悪化が原因", "後発参入と国内市場の構造問題"],
+      "last_action": "2026-04-11: 分析ノート執筆",
+      "status": "active",
+      "author": "cc",
+      "aliases": ["Coinbase", "coinbase", "Coinbase Japan", "撤退", "exit", "規制", "FSA", "日本取引所"],
+      "updated": "2026-04-11T14:30:00+09:00"
+    },
+    {
+      "_content_hash": "e5f6g7h8...",
+      "path": "wiki/projects/meowtype-status.md",
+      "title": "meowtype — macOS音声入力アプリ 進捗",
+      "summary_points": ["SwiftUIネイティブ開発中", "中日英3言語混合入力対応", "v0.1内部テスト段階"],
+      "last_action": "2026-04-28: 音声認識エンジンのレイテンシ改善",
+      "status": "active",
+      "author": "cc",
+      "aliases": ["meowtype", "音声入力", "voice input", "macOS", "SwiftUI"],
+      "updated": "2026-04-28T20:15:00+09:00"
+    },
+    {
+      "_content_hash": "i9j0k1l2...",
+      "path": "hermes-knowledge/job-search/crypto-ai-companies.md",
+      "title": "Crypto×AI 企業 求人スキャン リスト",
+      "summary_points": ["対象企業20社", "週次で求人更新", "日本/リモート両カバー"],
+      "last_action": "2026-05-01: 新規5社追加",
+      "status": "active",
+      "author": "hermes",
+      "aliases": ["求人", "job", "Crypto+AI", "企業リスト", "company list", "リモート"],
+      "updated": "2026-05-01T09:00:00+09:00"
+    }
+  ]
+}
