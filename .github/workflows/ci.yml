@@ -23,31 +23,85 @@ jobs:
       - name: Test --help
         run: python3 rebuild-vault-index.py --help
 
-      - name: Test dry-run with example data
+      - name: Build index from example fixture
         run: |
           python3 rebuild-vault-index.py \
             --vault examples \
             --output /tmp/test-index.json \
             --scan notes:cc
 
-      - name: Validate JSON output
+      - name: Validate JSON output (schema v1.1)
         run: |
           python3 -c "
           import json
           with open('/tmp/test-index.json') as f:
               data = json.load(f)
+          assert 'version' in data, 'Missing version'
           assert 'entries' in data, 'Missing entries'
           assert 'updated' in data, 'Missing updated timestamp'
-          assert data['total_entries'] >= 1, 'No entries found'
-          print(f'✅ {data[\"total_entries\"]} entries, valid JSON')
+          assert isinstance(data['entries'], dict), 'entries must be a dict'
+          assert len(data['entries']) >= 1, 'No entries found'
+          for eid, e in data['entries'].items():
+              assert '_content_hash' in e, f'{eid} missing _content_hash'
+              assert 'path' in e, f'{eid} missing path'
+              assert 'aliases' in e, f'{eid} missing aliases'
+          print(f'OK {len(data[\"entries\"])} entries, valid v{data[\"version\"]} schema')
           "
 
-      - name: Test incremental rebuild (no changes)
+      - name: Incremental rebuild reports 0 changed
         run: |
+          OUT=$(python3 rebuild-vault-index.py \
+            --vault examples \
+            --output /tmp/test-index.json \
+            --scan notes:cc 2>&1)
+          echo "$OUT"
+          echo "$OUT" | grep -q "0 changed" || (echo "FAIL: expected '0 changed' on no-op rebuild" && exit 1)
+
+      - name: Corrupted index is preserved as .broken
+        run: |
+          echo "not json{{{" > /tmp/test-index.json
           python3 rebuild-vault-index.py \
             --vault examples \
             --output /tmp/test-index.json \
-            --scan notes:cc 2>&1 | grep "0 changed" || echo "WARNING: incremental check (may be expected in CI)"
+            --scan notes:cc 2>&1 | tee /tmp/run.log
+          grep -q "Moved to .* to preserve" /tmp/run.log || (echo "FAIL: expected broken-rename warning" && exit 1)
+          ls /tmp/test-index.json.broken-* > /dev/null || (echo "FAIL: .broken file not created" && exit 1)
+          python3 -c "import json; json.load(open('/tmp/test-index.json'))"
+
+      - name: Cross-scan-dir collisions are disambiguated
+        run: |
+          mkdir -p /tmp/collide-vault/career /tmp/collide-vault/projects
+          printf -- '---\ntitle: A\n---\nbody\n' > /tmp/collide-vault/career/coinbase.md
+          printf -- '---\ntitle: B\n---\nbody\n' > /tmp/collide-vault/projects/coinbase.md
+          python3 rebuild-vault-index.py \
+            --vault /tmp/collide-vault \
+            --output /tmp/collide-index.json \
+            --scan career:cc projects:cc 2>&1 | tee /tmp/collide.log
+          grep -q "collides across scan dirs" /tmp/collide.log || (echo "FAIL: expected collision warning" && exit 1)
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/collide-index.json'))
+          ids = set(d['entries'].keys())
+          assert ids == {'career-coinbase', 'projects-coinbase'}, f'unexpected ids: {ids}'
+          print('OK: collisions disambiguated')
+          "
+
+      - name: rag_exclude frontmatter is honored
+        run: |
+          mkdir -p /tmp/exclude-vault/notes
+          printf -- '---\ntitle: Keep\n---\nbody\n' > /tmp/exclude-vault/notes/keep.md
+          printf -- '---\ntitle: Skip\nrag_exclude: true\n---\nbody\n' > /tmp/exclude-vault/notes/skip.md
+          python3 rebuild-vault-index.py \
+            --vault /tmp/exclude-vault \
+            --output /tmp/exclude-index.json \
+            --scan notes:cc
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/exclude-index.json'))
+          ids = set(d['entries'].keys())
+          assert ids == {'keep'}, f'rag_exclude not honored: {ids}'
+          print('OK: rag_exclude works')
+          "
 
       - name: Check file encoding
         run: |
