@@ -21,11 +21,17 @@ KEY DESIGN DECISIONS:
 
 import hashlib
 import json
+import os
 import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
+
+
+# Bumped to 1.1: deterministic cross-scan-dir collision disambiguation,
+# atomic writes, and corrupted-index preservation.
+PROTOCOL_VERSION = "1.1"
 
 
 # ═══════════════════════════════════════════════════
@@ -224,13 +230,43 @@ def resolve_aliases(
 # ═══════════════════════════════════════════════════
 
 def load_old_index(output_path: Path) -> dict:
-    """Load previous index for incremental comparison."""
+    """Load previous index for incremental comparison.
+
+    On parse failure, rename the broken file to <name>.broken-<ts> so
+    hand-curated aliases can be recovered manually instead of being
+    silently lost on the next rebuild.
+    """
     if not output_path.exists():
         return {"entries": {}, "updated": "1970-01-01"}
     try:
         return json.loads(output_path.read_text(encoding="utf-8"))
-    except Exception:
+    except Exception as e:
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        broken = output_path.with_name(f"{output_path.name}.broken-{ts}")
+        try:
+            output_path.rename(broken)
+            print(
+                f"WARNING: {output_path} is corrupted ({e}). "
+                f"Moved to {broken} to preserve hand-curated aliases for recovery.",
+                file=sys.stderr,
+            )
+        except Exception as rename_err:
+            print(
+                f"WARNING: {output_path} is corrupted ({e}) "
+                f"and could not be renamed: {rename_err}",
+                file=sys.stderr,
+            )
         return {"entries": {}, "updated": "1970-01-01"}
+
+
+def slugify(s: str) -> str:
+    """Lowercase, replace spaces and underscores with hyphens."""
+    return s.lower().replace(" ", "-").replace("_", "-")
+
+
+def naive_entry_id(md_file: Path) -> str:
+    """Stem-based entry_id (may collide across scan dirs — resolve in main)."""
+    return slugify(md_file.stem)
 
 
 def scan_directory(
@@ -240,12 +276,16 @@ def scan_directory(
     alias_maps: dict,
     cutoff_days: int = DEFAULT_CUTOFF_DAYS,
 ) -> list:
-    """Scan directory for indexable files. Returns list of entry dicts."""
+    """Scan directory for indexable files. Returns list of entry dicts.
+
+    Cross-scan-dir collision resolution is handled by the caller.
+    """
     entries = []
     if not directory.exists():
         return entries
 
     cutoff = datetime.now() - timedelta(days=cutoff_days)
+    old_paths = {e.get("path") for e in old_entries.values() if isinstance(e, dict)}
 
     for md_file in sorted(directory.rglob("*.md")):
         if not should_index(md_file, directory):
@@ -253,24 +293,16 @@ def scan_directory(
 
         mtime = datetime.fromtimestamp(md_file.stat().st_mtime)
         if mtime < cutoff:
-            continue
+            # Don't drop a file we've already indexed — preserves hand-curated
+            # aliases for older notes that fall outside the rolling window.
+            if str(md_file) not in old_paths:
+                continue
 
         content_hash = file_hash(md_file)
-
-        entry_id = md_file.stem.lower().replace(" ", "-").replace("_", "-")
-
-        # Handle name collisions: prefix with parent dir
-        collision_count = sum(
-            1 for e in entries
-            if Path(e["path"]).stem.lower().replace(" ", "-").replace("_", "-") == entry_id
-        )
-        if collision_count > 0:
-            parent_dir = md_file.parent.name.lower().replace(" ", "-").replace("_", "-")
-            entry_id = f"{parent_dir}-{entry_id}"
-
+        entry_id = naive_entry_id(md_file)
         old_entry = old_entries.get(entry_id)
 
-        # Incremental skip
+        # Incremental skip — same hash means content unchanged, reuse old entry.
         if old_entry and old_entry.get("_content_hash") == content_hash:
             entries.append(old_entry)
             continue
@@ -360,25 +392,60 @@ def main():
     old_index = load_old_index(output_path)
     old_entries = old_index.get("entries", {})
 
-    new_entries = {}
+    # Two-pass collection so we can detect cross-scan-dir entry_id collisions
+    # and disambiguate deterministically with the scan-root basename.
+    collected = []  # (naive_eid, scan_root_slug, entry)
+    naive_counts = {}
 
     for directory, author in scan_targets:
+        scan_slug = slugify(directory.name)
         for entry in scan_directory(
             directory, author, old_entries, alias_maps,
-            cutoff_days=args.cutoff_days
+            cutoff_days=args.cutoff_days,
         ):
-            entry_id = Path(entry["path"]).stem.lower().replace(" ", "-").replace("_", "-")
-            new_entries[entry_id] = entry
+            md_path = Path(entry["path"])
+            naive_eid = naive_entry_id(md_path)
+            collected.append((naive_eid, scan_slug, entry))
+            naive_counts[naive_eid] = naive_counts.get(naive_eid, 0) + 1
+
+    new_entries = {}
+    warned_naive = set()
+    for naive_eid, scan_slug, entry in collected:
+        if naive_counts[naive_eid] > 1:
+            final_eid = f"{scan_slug}-{naive_eid}" if scan_slug else naive_eid
+            if naive_eid not in warned_naive:
+                print(
+                    f"NOTE: entry_id '{naive_eid}' collides across scan dirs — "
+                    f"disambiguating with scan-root prefix.",
+                    file=sys.stderr,
+                )
+                warned_naive.add(naive_eid)
+        else:
+            final_eid = naive_eid
+
+        if final_eid in new_entries:
+            print(
+                f"WARNING: unresolvable entry_id collision '{final_eid}' "
+                f"({entry.get('path')}) — keeping last write.",
+                file=sys.stderr,
+            )
+        new_entries[final_eid] = entry
 
     index = {
-        "updated": datetime.now().strftime("%Y-%m-%d"),
+        "version": PROTOCOL_VERSION,
+        "updated": datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z"),
         "entries": new_entries,
     }
 
-    output_path.write_text(
+    # Atomic write: tmp + os.replace. A cron interruption or full disk leaves
+    # the previous index intact instead of producing a half-written JSON file
+    # that trips the agent's "index corrupted" fallback path.
+    tmp_path = output_path.with_name(output_path.name + ".tmp")
+    tmp_path.write_text(
         json.dumps(index, ensure_ascii=False, indent=2),
-        encoding="utf-8"
+        encoding="utf-8",
     )
+    os.replace(tmp_path, output_path)
 
     changed = sum(
         1 for kid, v in new_entries.items()
