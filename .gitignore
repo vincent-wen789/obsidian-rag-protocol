@@ -12,3 +12,8 @@ venv/
 dist/
 build/
 *.egg-info/
+
+# Generated indexes — never commit, always rebuild
+examples/vault-index.json
+*.broken-*
+

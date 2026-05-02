@@ -48,7 +48,7 @@ jobs:
           assert 'entries' in data, 'Missing entries'
           assert 'updated' in data, 'Missing updated timestamp'
           assert isinstance(data['entries'], dict), 'entries must be a dict'
-          assert len(data['entries']) >= 1, 'No entries found'
+          assert len(data['entries']) == 3, f'expected 3 entries from example fixture, got {len(data[\"entries\"])}'
           for eid, e in data['entries'].items():
               assert '_content_hash' in e, f'{eid} missing _content_hash'
               assert 'path' in e, f'{eid} missing path'
@@ -136,6 +136,20 @@ jobs:
           OUT=$(python3 orp_reader.py --index /tmp/reader-index.json match "撤退")
           echo "$OUT"
           echo "$OUT" | grep -q "coinbase-japan-analysis" || (echo "FAIL: CJK token did not match" && exit 1)
+
+      - name: Reader — distinct queries hit distinct entries
+        run: |
+          # Each example note should be reachable via at least one distinct alias
+          for query_expected in \
+            "stablecoin:japan-stablecoin-regulation" \
+            "meowtype:meowtype-status" \
+            "撤退:coinbase-japan-analysis"; do
+            QUERY="${query_expected%%:*}"
+            EXPECTED="${query_expected##*:}"
+            OUT=$(python3 orp_reader.py --index /tmp/reader-index.json match "$QUERY")
+            echo "query='$QUERY' -> $OUT"
+            echo "$OUT" | grep -q "$EXPECTED" || (echo "FAIL: '$QUERY' did not match '$EXPECTED'" && exit 1)
+          done
 
       - name: Reader — no match returns exit 1
         run: |

@@ -1,27 +1,55 @@
-# Example Output
+# Example vault
 
-This directory contains example files that demonstrate the Obsidian RAG Protocol in action.
+A 3-note Obsidian-shaped fixture you can run the indexer / reader / health / link-check against in 30 seconds.
 
-## What's here
+## Layout
 
 ```
 examples/
-├── vault-index.json              # Example index output (3 entries)
 ├── notes/
-│   └── coinbase-japan-analysis.md # Example Obsidian note with frontmatter
-└── README.md                      # This file
+│   ├── coinbase-japan-analysis.md    # entity analysis
+│   ├── japan-stablecoin-regulation.md # market intel
+│   └── meowtype-status.md             # personal project
+└── README.md                          # this file
 ```
 
-## How to read these
+`vault-index.json` is **not** committed — it's a build artifact, generated below. Committing it would let it drift from the source notes; CI builds it fresh on every run instead.
 
-- **vault-index.json** — This is what `rebuild-vault-index.py` produces. Each entry has a `_content_hash` (SHA256), extracted frontmatter (`aliases`, `summary_points`, etc.), and metadata. An agent reads this file once per session to know what's in the vault.
+## 30-second walkthrough
 
-- **coinbase-japan-analysis.md** — An Obsidian note with YAML frontmatter. The indexer reads the frontmatter to populate `vault-index.json`. Notice the `aliases` field: these are the keywords that trigger fuzzy matching when an agent searches the index.
+```bash
+# 1. Build the index from the notes above
+python3 rebuild-vault-index.py \
+  --vault examples \
+  --output /tmp/example-index.json \
+  --scan notes:cc
 
-- **Agent matching flow**: Say an agent reads the index and the user asks "Any news on Coinbase?" → The agent scans `aliases` arrays → finds "Coinbase" in entry 0 → reads `wiki/career/company-research.md` → answers with context.
+# 2. Inspect the index
+python3 orp_reader.py --index /tmp/example-index.json status
+# 3 entries, updated 2026-..., fresh, schema 1.1
 
-## Try it yourself
+# 3. Match a query (English, Japanese, or both)
+python3 orp_reader.py --index /tmp/example-index.json match "stablecoin"
+# japan-stablecoin-regulation  examples/notes/japan-stablecoin-regulation.md  [matched: stablecoin]
 
-1. Copy `vault-index.json` somewhere your agent can read it
-2. Add a system prompt rule: "Before answering non-trivial questions, read vault-index.json"
-3. Ask your agent a question that matches one of the example aliases
+python3 orp_reader.py --index /tmp/example-index.json match "撤退"
+# coinbase-japan-analysis  examples/notes/coinbase-japan-analysis.md  [matched: 撤退]
+
+# 4. Validate index health
+python3 orp_health.py --index /tmp/example-index.json
+# OK: 3 entries, ... KB, 0 failures, 0 warnings
+
+# 5. Check there are no dead wikilinks
+python3 orp_link_check.py --vault examples --ignore-orphans
+# Live links: ...  Dead links: 0
+```
+
+## What each note demonstrates
+
+- **coinbase-japan-analysis.md** — entity analysis with overlapping CJK + Latin aliases. Try matching "Coinbase", "撤退", or "FSA".
+- **japan-stablecoin-regulation.md** — market intel with future-dated `last_action`. Mix of `JPYC`, `USDC Japan`, `改正資金決済法` aliases.
+- **meowtype-status.md** — personal project with minimal aliases. Shows that bare frontmatter is enough; you don't need a long alias list to be searchable.
+
+## Use as your starter
+
+Copy `notes/*.md` into your own vault, replace the content with yours, keep the frontmatter shape (`title`, `aliases`, `summary_points`, `last_action`, `status`, `author`). Run the indexer against your vault root and you have a working ORP setup.
