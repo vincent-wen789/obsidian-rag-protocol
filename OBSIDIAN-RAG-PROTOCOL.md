@@ -1,12 +1,20 @@
 # OBSIDIAN-RAG-PROTOCOL.md
 
-## Version 1.0
+## Version 1.1
+
+Changes from 1.0:
+- Index document gains a top-level `version` field (required).
+- `updated` field is an ISO-8601 timestamp with timezone offset (was date-only).
+- Cross-scan-dir entry_id collisions are deterministically disambiguated with the scan-root basename — see §1.3.
+- Indexer writes are atomic (tmp + rename); a crashed rebuild never leaves a half-written index.
+- A corrupted index is renamed to `<name>.broken-<ts>` instead of being silently overwritten — preserves hand-curated aliases for recovery.
+- §5.2 specifies atomic-append semantics for the collaboration log.
 
 ---
 
 ## Abstract
 
-The Obsidian RAG Protocol (ORP) defines how AI agents retrieve context from an Obsidian vault using a machine-readable JSON index. It enables zero-token-overhead context injection, incremental index updates, bidirectional multi-agent collaboration, and automatic skill-to-vault context expansion.
+The Obsidian RAG Protocol (ORP) defines how AI agents retrieve context from an Obsidian vault using a machine-readable JSON index. It enables low-overhead lazy context injection, incremental index updates, bidirectional multi-agent collaboration, and automatic skill-to-vault context expansion.
 
 ---
 
@@ -20,7 +28,8 @@ The index file is a JSON document stored at a configurable path (default: `~/.he
 
 ```json
 {
-  "updated": "YYYY-MM-DD",
+  "version": "1.1",
+  "updated": "2026-05-02T09:00:00+09:00",
   "entries": {
     "<entry-id>": {
       "_content_hash": "<sha256-hex>",
@@ -31,7 +40,7 @@ The index file is a JSON document stored at a configurable path (default: `~/.he
         "key_points": ["<string>", ...],
         "last_action": "<optional-string>"
       },
-      "updated": "<YYYY-MM-DD>",
+      "updated": "<YYYY-MM-DD or ISO-8601>",
       "author": "<cc|hermes|vincent|shared>",
       "aliases": ["<searchable-string>", ...]
     }
@@ -39,9 +48,15 @@ The index file is a JSON document stored at a configurable path (default: `~/.he
 }
 ```
 
+`entries` is an object keyed by entry_id (not an array). Readers MUST treat unknown top-level keys as forward-compatible additions and ignore them.
+
 ### 1.3 Entry ID
 
-Derived from filename stem: lowercase, hyphens replace spaces and underscores. No directory prefix unless collision occurs.
+Derived from filename stem: lowercase, with spaces and underscores replaced by hyphens.
+
+When the same naive entry_id would be produced by two files in different scan roots, the indexer MUST disambiguate by prefixing the scan-root basename: `<scan-root-slug>-<naive-id>`. Disambiguation applies to ALL colliding entries, not just the second one — this keeps IDs stable across rebuilds. Non-colliding entries keep their bare stem-based ID.
+
+The indexer MUST emit a `NOTE:` to stderr the first time a collision is observed in a run. If even the disambiguated form collides (two files with the same name in same-named subdirectories of two different scan roots), the indexer MUST emit a `WARNING:` to stderr and keep the last write.
 
 ### 1.4 Size Target
 
@@ -169,8 +184,9 @@ No algorithmic alias generation. This prevents drift.
 ### 4.3 Error Handling
 
 - Index file missing → ask user to run rebuild script
-- JSON parse error → "Index corrupted, rebuild?" — do NOT silently skip
+- JSON parse error → "Index corrupted, rebuild?" — do NOT silently skip. The indexer MUST preserve the broken file at `<index-path>.broken-<ts>` rather than overwriting it on the next rebuild.
 - Index stale (>4 days) → offer rebuild, do NOT auto-rebuild
+- Rebuild MUST be atomic — write to a temp file in the same directory and `rename(2)` into place. A reader observing the index path mid-rebuild MUST always see either the previous valid index or the new one, never a partial write.
 
 ---
 
@@ -190,6 +206,12 @@ vault/
 ### 5.2 Collaboration Channel
 
 A designated file (`wiki/log.md`) acts as the inter-agent communication log. Both agents append entries with format `🦅[Agent] <message>`. This file is NEVER overwritten — append-only.
+
+Writers MUST use atomic append semantics, since two agents may write concurrently:
+- Open with `O_APPEND` and issue a single `write(2)` ≤ `PIPE_BUF` (4096 bytes on Linux/macOS), OR
+- Hold an `flock(LOCK_EX)` for the duration of the write.
+
+Entries longer than `PIPE_BUF` MUST use the lock approach. Naive `read → modify → write` is forbidden — it loses concurrent writes.
 
 ### 5.3 Cross-Write Protocol
 
@@ -237,6 +259,10 @@ Content hash comparison drives incremental updates. Only re-extract frontmatter 
 | Yes | Yes | Reuse old entry (aliases, summary, all metadata) |
 | Yes | No | Full re-extraction from file |
 | No | — | New entry, full extraction |
+
+### 7.4 Cutoff Window
+
+The indexer applies a rolling age cutoff (default 90 days, configurable) to bound the working set. The cutoff MUST NOT drop a file that already has an entry in the previous index — once indexed, an entry stays until the file is removed from the vault or matches an exclusion rule. Otherwise hand-curated aliases for older notes silently disappear after the cutoff window.
 
 ### 7.3 Change Count
 

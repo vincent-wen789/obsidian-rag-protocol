@@ -23,7 +23,7 @@ In late 2025, I hit a wall: my AI agent (Hermes) would forget everything between
 
 Most people were solving this with huge system prompts or manual file pasting. I wanted something better:
 
-- **Zero token overhead** on context injection (no LLM reading an entire vault)
+- **Lazy context injection** — agent reads a ~15KB index on demand, not the whole vault. Only matched files get loaded.
 - **Incremental indexing** that survives macOS iCloud sync (mtime is unreliable)
 - **Bidirectional protocol** — two agents (Hermes + Claude Code) reading from the same vault with clearly separated directories
 - **Human-readable index** that's also machine-queryable
@@ -168,7 +168,8 @@ Features:
 
 ```json
 {
-  "updated": "2026-05-02",
+  "version": "1.1",
+  "updated": "2026-05-02T09:00:00+09:00",
   "entries": {
     "project-name": {
       "_content_hash": "a1b2c3...",
@@ -221,10 +222,10 @@ This protocol is currently running in production in my personal Hermes Agent set
 - **Before**: Hermes writes research notes. Claude Code writes project docs. They're in separate silos — no shared context, no cross-referencing, no single source of truth.
 - **After**: Two agents share one vault through directory partitioning. Hermes reads Claude Code's `wiki/` updates; Claude Code reads Hermes's `hermes-knowledge/` intel. The collaboration log (`log.md`) tracks everything. Both agents work from the same indexed context layer.
 
-### 3. Zero Token Overhead on Context Injection
+### 3. Bounded Token Cost on Context Injection
 
 - **Before**: You paste your entire vault into the system prompt (thousands of tokens, every conversation) or manually search and attach files (tedious, error-prone, you forget things).
-- **After**: One `read_file(vault-index.json)` call — ~15KB, triggered automatically on non-trivial queries, zero prompt tokens consumed at rest. Only the matched vault file gets loaded, and only when relevant.
+- **After**: One `read_file(vault-index.json)` call — ~15KB / ~4K tokens — triggered only on non-trivial queries. Only the matched vault file gets loaded, and only when relevant. Token cost is bounded by index size, not vault size.
 
 ---
 
