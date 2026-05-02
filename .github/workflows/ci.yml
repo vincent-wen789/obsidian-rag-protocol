@@ -21,11 +21,15 @@ jobs:
         run: |
           python3 -m py_compile rebuild-vault-index.py
           python3 -m py_compile orp_reader.py
+          python3 -m py_compile orp_health.py
+          python3 -m py_compile orp_link_check.py
 
       - name: Test --help
         run: |
           python3 rebuild-vault-index.py --help
           python3 orp_reader.py --help
+          python3 orp_health.py --help
+          python3 orp_link_check.py --help
 
       - name: Build index from example fixture
         run: |
@@ -158,8 +162,93 @@ jobs:
           set -e
           test "$RC" = "3" || (echo "FAIL: expected exit 3 on corrupted index, got $RC" && exit 1)
 
+      - name: Health — fresh index passes
+        run: |
+          python3 orp_health.py --index /tmp/reader-index.json
+
+      - name: Health — stale index fails
+        run: |
+          python3 -c "
+          import json
+          from datetime import datetime, timezone, timedelta
+          d = json.load(open('/tmp/reader-index.json'))
+          d['updated'] = (datetime.now(timezone.utc) - timedelta(days=30)).strftime('%Y-%m-%dT%H:%M:%S%z')
+          json.dump(d, open('/tmp/stale-index.json', 'w'), ensure_ascii=False, indent=2)
+          "
+          set +e
+          python3 orp_health.py --index /tmp/stale-index.json
+          RC=$?
+          set -e
+          test "$RC" = "1" || (echo "FAIL: expected health exit 1 on stale index, got $RC" && exit 1)
+
+      - name: Health — missing required field fails
+        run: |
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/reader-index.json'))
+          for eid in d['entries']:
+              del d['entries'][eid]['_content_hash']
+          json.dump(d, open('/tmp/broken-shape.json', 'w'), ensure_ascii=False, indent=2)
+          "
+          set +e
+          python3 orp_health.py --index /tmp/broken-shape.json
+          RC=$?
+          set -e
+          test "$RC" = "1" || (echo "FAIL: expected health exit 1 on missing field, got $RC" && exit 1)
+
+      - name: Health — orphan path warns but does not fail
+        run: |
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/reader-index.json'))
+          for eid in d['entries']:
+              d['entries'][eid]['path'] = '/tmp/this/does/not/exist.md'
+          json.dump(d, open('/tmp/orphan-index.json', 'w'), ensure_ascii=False, indent=2)
+          "
+          OUT=$(python3 orp_health.py --index /tmp/orphan-index.json 2>&1)
+          echo "$OUT"
+          echo "$OUT" | grep -q "WARN:.*paths that no longer exist" || (echo "FAIL: expected orphan warning" && exit 1)
+
+      - name: Health — strict mode escalates warnings to exit 2
+        run: |
+          set +e
+          python3 orp_health.py --index /tmp/orphan-index.json --strict
+          RC=$?
+          set -e
+          test "$RC" = "2" || (echo "FAIL: expected --strict exit 2 on orphans, got $RC" && exit 1)
+
+      - name: Link check — clean vault passes
+        run: |
+          mkdir -p /tmp/link-vault/wiki
+          printf 'see [[wiki/target]] for context\n' > /tmp/link-vault/wiki/source.md
+          printf 'target content\n' > /tmp/link-vault/wiki/target.md
+          python3 orp_link_check.py --vault /tmp/link-vault --ignore-orphans
+
+      - name: Link check — dead links fail with exit 1
+        run: |
+          mkdir -p /tmp/dead-vault/wiki
+          printf 'see [[wiki/missing]] for details\n' > /tmp/dead-vault/wiki/source.md
+          set +e
+          OUT=$(python3 orp_link_check.py --vault /tmp/dead-vault --ignore-orphans 2>&1)
+          RC=$?
+          set -e
+          echo "$OUT"
+          test "$RC" = "1" || (echo "FAIL: expected link-check exit 1 on dead link, got $RC" && exit 1)
+          echo "$OUT" | grep -q "Dead links: 1" || (echo "FAIL: dead link not reported" && exit 1)
+
+      - name: Link check — template variables and dirs are not flagged
+        run: |
+          mkdir -p /tmp/tpl-vault/wiki/projects
+          printf 'see [[wiki/projects/{date}]] and [[wiki/projects/]] for refs\n' > /tmp/tpl-vault/wiki/start.md
+          python3 orp_link_check.py --vault /tmp/tpl-vault --ignore-orphans
+
+      - name: Link check — JSON output is parseable
+        run: |
+          OUT=$(python3 orp_link_check.py --vault /tmp/link-vault --ignore-orphans --json)
+          echo "$OUT" | python3 -c "import json, sys; d=json.load(sys.stdin); assert 'dead' in d and 'live' in d; print('OK json shape')"
+
       - name: Check file encoding
         run: |
-          python3 -c "open('rebuild-vault-index.py', encoding='utf-8').read()" || (echo "Bad encoding in indexer" && exit 1)
-          python3 -c "open('orp_reader.py', encoding='utf-8').read()" || (echo "Bad encoding in reader" && exit 1)
-          python3 -c "open('examples/vault-index.json', encoding='utf-8').read()" || (echo "Bad encoding in examples" && exit 1)
+          for f in rebuild-vault-index.py orp_reader.py orp_health.py orp_link_check.py; do
+            python3 -c "open('$f', encoding='utf-8').read()" || (echo "Bad encoding in $f" && exit 1)
+          done
