@@ -95,7 +95,22 @@ def extract_frontmatter(text: str) -> dict:
                 list_key = None
                 list_vals = []
 
-        # Simple key: value
+        # Bare key with empty value, list on subsequent indented lines:
+        #   aliases:
+        #     - foo
+        #     - bar
+        # This is the standard YAML multi-line list form. Without this branch
+        # the empty-value `aliases:` line falls through to the kv regex below,
+        # which requires `(.+)` after the colon, fails to match, and the whole
+        # multi-line list gets silently dropped.
+        bare_key = re.match(r"^(\w[\w_-]*):\s*$", line)
+        if bare_key:
+            in_list = True
+            list_key = bare_key.group(1)
+            list_vals = []
+            continue
+
+        # Simple key: value (also handles `key: - val` start of list)
         kv = re.match(r"^(\w[\w_-]*):\s*(.+)", line)
         if kv:
             key = kv.group(1)

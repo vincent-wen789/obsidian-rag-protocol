@@ -94,6 +94,55 @@ jobs:
           print('OK: collisions disambiguated')
           "
 
+      - name: Frontmatter parser handles all three YAML list forms
+        run: |
+          mkdir -p /tmp/yaml-vault/notes
+          # Form A: inline list on one line
+          cat > /tmp/yaml-vault/notes/inline-form.md <<'EOF'
+          ---
+          title: Inline Form
+          aliases: [first-inline, second-inline, third-inline]
+          ---
+          body
+          EOF
+          # Form B: list starts on key line with `- val`
+          cat > /tmp/yaml-vault/notes/sameline-form.md <<'EOF'
+          ---
+          title: Sameline Form
+          aliases: - first-sameline
+            - second-sameline
+            - third-sameline
+          ---
+          body
+          EOF
+          # Form C: bare key on one line, list on subsequent indented lines
+          # This is the standard YAML multi-line form that was silently dropped
+          # before this fix.
+          cat > /tmp/yaml-vault/notes/standard-form.md <<'EOF'
+          ---
+          title: Standard Form
+          aliases:
+            - first-standard
+            - second-standard
+            - third-standard
+          ---
+          body
+          EOF
+          python3 rebuild-vault-index.py \
+            --vault /tmp/yaml-vault \
+            --output /tmp/yaml-index.json \
+            --scan notes:cc
+          python3 -c "
+          import json
+          d = json.load(open('/tmp/yaml-index.json'))
+          for eid, expect in [('inline-form', 'first-inline'),
+                              ('sameline-form', 'first-sameline'),
+                              ('standard-form', 'first-standard')]:
+              aliases = d['entries'][eid]['aliases']
+              assert expect in aliases, f'{eid} missing {expect}, got {aliases}'
+          print('OK: all three YAML list forms parsed')
+          "
+
       - name: rag_exclude frontmatter is honored
         run: |
           mkdir -p /tmp/exclude-vault/notes
