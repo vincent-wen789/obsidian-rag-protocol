@@ -138,20 +138,34 @@ if [[ -z "$SCAN_DIRS" ]]; then
   [[ -z "$SCAN_DIRS" ]] && SCAN_DIRS="wiki:unknown"
 fi
 
-# ─── Step 1: Install rebuild script ───────────────────────────────────────────
-info "Installing rebuild script..."
+# ─── Step 1: Install all utilities ─────────────────────────────────────────────
+info "Installing ORP utilities..."
 
 INSTALL_BIN="$HOME/.hermes/bin"
 mkdir -p "$INSTALL_BIN"
 
-SOURCE_SCRIPT="$REPO_ROOT/rebuild-vault-index.py"
-if [[ ! -f "$SOURCE_SCRIPT" ]]; then
-  die "Source rebuild script not found at $SOURCE_SCRIPT. Are you running this from the repo?"
-fi
+# All single-file utilities the spec ships. Each is independent and can be
+# invoked standalone; bundling them at install time avoids the "user only
+# discovers tool X exists 6 months later" failure mode.
+UTILITIES=(
+  "rebuild-vault-index.py"
+  "orp_reader.py"
+  "orp_health.py"
+  "orp_link_check.py"
+  "expand_aliases.py"
+  "convert_bare_to_fullpath.py"
+)
 
-cp "$SOURCE_SCRIPT" "$INSTALL_BIN/rebuild-vault-index.py"
-chmod +x "$INSTALL_BIN/rebuild-vault-index.py"
-ok "Installed rebuild script to $INSTALL_BIN/rebuild-vault-index.py"
+for util in "${UTILITIES[@]}"; do
+  SOURCE="$REPO_ROOT/$util"
+  if [[ ! -f "$SOURCE" ]]; then
+    warn "Utility $util not found at $SOURCE — skipping"
+    continue
+  fi
+  cp "$SOURCE" "$INSTALL_BIN/$util"
+  chmod +x "$INSTALL_BIN/$util"
+  ok "Installed $util to $INSTALL_BIN/$util"
+done
 
 # ─── Step 2: Install Hermes skill ────────────────────────────────────────────
 info "Installing Hermes skill..."

@@ -116,12 +116,26 @@ def build_name_index(vault: Path) -> dict:
 
 
 def scan_file(path: Path):
-    """Yield (line_number, ref) for every wikilink / inline-path in the file."""
+    """Yield (line_number, ref) for every wikilink / inline-path in the file.
+
+    Skips fenced code blocks (``` ... ```). Skill docs and READMEs typically
+    contain wikilink syntax examples inside fenced blocks; counting those as
+    real references generates noise and trains users to ignore the report.
+    Inline single-backtick code is preserved — RE_INLINE_PATH targets it
+    intentionally to catch path references like `wiki/foo.md` in prose.
+    """
     try:
         text = path.read_text(encoding="utf-8")
     except (UnicodeDecodeError, OSError):
         return
+    in_fence = False
     for ln, line in enumerate(text.splitlines(), start=1):
+        # Toggle fence state on lines that open/close a triple-backtick block.
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
         for m in RE_WIKILINK.finditer(line):
             yield ln, m.group(1).strip()
         for m in RE_INLINE_PATH.finditer(line):

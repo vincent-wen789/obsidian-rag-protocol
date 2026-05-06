@@ -1,6 +1,11 @@
 # OBSIDIAN-RAG-PROTOCOL.md
 
-## Version 1.2
+## Version 1.3
+
+Changes from 1.2:
+- §3.4 (new) Alias Quality Maintenance — substring matching needs alias breadth. Empirical floor: 5+ aliases per entry covering project root / EN-CN / concept terms / abbreviations / version anchors. Without it, RAG hit rate stays low on real queries despite "correct" indexing.
+- §3.5 (new) Wikilink Hygiene — cross-scan-dir wikilinks MUST use full paths. Bare `[[name]]` resolution depends on Obsidian's vault-wide name lookup, which non-Obsidian consumers (link checker, alias maintenance, multi-agent collaboration) cannot replicate. Bare links across scan-dir boundaries silently break for those consumers.
+- §11 utilities expanded with `expand_aliases.py` (alias maintenance) and `convert_bare_to_fullpath.py` (wikilink migration). Health checker now reports thin alias coverage; link checker now skips fenced code blocks (skill docs and READMEs commonly contain wikilink syntax examples that should not count as references).
 
 Changes from 1.1:
 - §1.4 size guidance loosened — the "<20KB" target was a 2024-era cost-of-context anchor and broke once production indexes grew past 30 entries. Replaced with a soft cap that scales with vault size and a recommendation to split cold archives.
@@ -210,6 +215,51 @@ content-unchanged files (matching SHA256), the indexer must refresh the
 `path` field even when reusing the cached entry. Otherwise downstream
 tools that resolve paths from the index (alias maintenance, frontmatter
 patchers) get stale paths and fail silently.
+
+### 3.5 Wikilink Hygiene
+
+Bare wikilinks (`[[note-name]]`) resolve via Obsidian's vault-wide
+name lookup. This works *inside Obsidian*, but every non-Obsidian
+consumer of the vault — the link checker, alias maintenance scripts,
+external grep, multi-agent coordination layers, plain-text indexers —
+has to either replicate that lookup or treat the bare link as broken.
+
+Cross-scan-dir wikilinks MUST use full paths:
+
+- ❌ `[[note-name]]` (bare; depends on Obsidian's resolver)
+- ✅ `[[wiki/projects/note-name]]` (full; resolvable by anything)
+
+Within the same scan-dir, bare wikilinks are tolerated — the resolver
+ambiguity is bounded. Across scan-dir boundaries (`wiki/` ↔
+`hermes-knowledge/`, or any multi-agent split), full paths are required.
+
+This rule is especially load-bearing for multi-agent setups (§5):
+Agent B cannot use Agent A's bare wikilinks reliably without
+replicating Obsidian's lookup, and silent breakage degrades trust
+in the shared knowledge layer.
+
+#### Migration: `convert_bare_to_fullpath.py`
+
+Existing vaults with bare wikilinks can migrate in bulk:
+
+1. Run the script in `--dry` mode to preview replacements
+2. Review ambiguous bare links (multiple stem matches) — these are
+   not auto-rewritten and require manual disambiguation
+3. Apply, then run `rebuild-vault-index.py` to refresh the index
+
+The script preserves pipe aliases (`[[target|display]]`) and anchors
+(`[[target#section]]`), skips fenced code blocks, and skips lines
+containing placeholder markers (e.g. `(待写)`, `(TODO)`) so
+intentional concept stubs that signal "click to create" affordance
+are preserved.
+
+#### Link checker exemption
+
+`orp_link_check.py` skips fenced code blocks during scan: skill docs
+and READMEs commonly contain wikilink syntax examples (`[[Note Name]]`,
+`![[image.png]]`) that should not count as broken references. Inline
+single-backtick references are still scanned — they typically point
+to real paths in prose ("see `wiki/projects/foo`").
 
 ---
 
