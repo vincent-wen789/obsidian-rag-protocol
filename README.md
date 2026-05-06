@@ -181,6 +181,7 @@ Intentionally not done:
 - [`orp_reader.py`](orp_reader.py) — single-file reader (library + CLI)
 - [`orp_health.py`](orp_health.py) — schema and freshness validator
 - [`orp_link_check.py`](orp_link_check.py) — wikilink integrity scanner
+- [`expand_aliases.py`](expand_aliases.py) — bulk frontmatter alias updater (when alias coverage is thin · spec §3.4)
 - [`INSTALL.md`](INSTALL.md) — installation, four trigger paths, agent integration
 - [`OBSIDIAN-RAG-PROTOCOL.md`](OBSIDIAN-RAG-PROTOCOL.md) — full protocol spec (v1.2)
 - [`examples/`](examples/) — three real notes you can run the full loop against in 30 seconds

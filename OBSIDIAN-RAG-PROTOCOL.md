@@ -169,6 +169,48 @@ Aliases are only updated when:
 
 No algorithmic alias generation. This prevents drift.
 
+### 3.4 Alias Quality Maintenance
+
+Substring matching is only as good as the alias coverage. Empirically, an
+entry with 2 aliases (typically just `[slug, title-kebab]`) misses most
+real queries — the user says "narrative game" and the entry's only English
+alias is the file slug. Aim for **5 or more aliases per entry**, covering:
+
+- **Project / topic root tag** — e.g. `if-game`, `cookie-ledger` — so all
+  related notes share a hub keyword
+- **EN ↔ CN counterpart** — for any non-English vault, every alias should
+  exist in both languages
+- **Concept names** — domain terms that appear in queries but not the title
+  (e.g. `narrative game` for an interactive-fiction project)
+- **Common abbreviations** — acronyms the user actually types
+- **Date / version anchors** — for time-sensitive entries (e.g.
+  `2026-Q2 求职` for a Q2 retrospective)
+
+#### Bulk maintenance: `expand_aliases.py`
+
+When you discover thin coverage across many entries (a single
+`orp_reader.py match` returning 0 hits for a query you'd expect),
+batch-update via `expand_aliases.py`:
+
+1. Curate a JSON additions file: `{entry_id: [aliases_to_add]}`
+2. Dry-run to preview merged diffs
+3. Apply — script merges frontmatter + indexer + your additions, dedupes
+4. Re-run `rebuild-vault-index.py` to refresh the index
+
+The script preserves existing aliases from both frontmatter AND the
+indexer's `ALIAS_MAPS` fallback, since writing frontmatter overrides the
+fallback per §3.1 — naive replacement would silently drop hand-curated
+data.
+
+#### Frontmatter staleness on file moves
+
+When you move a vault file to a new subdirectory between rebuilds, the
+incremental rebuild path detects the new location via `rglob` but, for
+content-unchanged files (matching SHA256), the indexer must refresh the
+`path` field even when reusing the cached entry. Otherwise downstream
+tools that resolve paths from the index (alias maintenance, frontmatter
+patchers) get stale paths and fail silently.
+
 ---
 
 ## 4. Auto Context Injection (Agent Behavior)

@@ -317,8 +317,15 @@ def scan_directory(
         entry_id = naive_entry_id(md_file)
         old_entry = old_entries.get(entry_id)
 
-        # Incremental skip — same hash means content unchanged, reuse old entry.
+        # Incremental skip — content unchanged → reuse cached entry.
+        # IMPORTANT: refresh `path` even when hash matches. A file moved to a
+        # new subdirectory keeps the same content hash but its old path is
+        # stale; downstream consumers (alias maintenance tools, frontmatter
+        # patchers) will fail to open the stored path.
         if old_entry and old_entry.get("_content_hash") == content_hash:
+            if old_entry.get("path") != str(md_file):
+                old_entry = dict(old_entry)
+                old_entry["path"] = str(md_file)
             entries.append(old_entry)
             continue
 
