@@ -161,7 +161,7 @@ ORP wins when you'd rather curate 5 aliases per important note than tune embeddi
 
 ## Status
 
-Spec is at v1.2. The repo ships four single-file Python utilities, all stdlib-only — together about 1,000 lines.
+Spec is at v1.3. The repo ships six single-file Python utilities, all stdlib-only — together about 1,500 lines.
 
 What's running:
 - A 40-ish-entry vault on a single laptop, three months and counting
@@ -179,11 +179,12 @@ Intentionally not done:
 
 - [`rebuild-vault-index.py`](rebuild-vault-index.py) — single-file indexer
 - [`orp_reader.py`](orp_reader.py) — single-file reader (library + CLI)
-- [`orp_health.py`](orp_health.py) — schema and freshness validator
-- [`orp_link_check.py`](orp_link_check.py) — wikilink integrity scanner
+- [`orp_health.py`](orp_health.py) — schema, freshness, and alias-coverage validator
+- [`orp_link_check.py`](orp_link_check.py) — wikilink integrity scanner (skips fenced code blocks)
 - [`expand_aliases.py`](expand_aliases.py) — bulk frontmatter alias updater (when alias coverage is thin · spec §3.4)
+- [`convert_bare_to_fullpath.py`](convert_bare_to_fullpath.py) — bulk migrate bare wikilinks to full paths (spec §3.5)
 - [`INSTALL.md`](INSTALL.md) — installation, four trigger paths, agent integration
-- [`OBSIDIAN-RAG-PROTOCOL.md`](OBSIDIAN-RAG-PROTOCOL.md) — full protocol spec (v1.2)
+- [`OBSIDIAN-RAG-PROTOCOL.md`](OBSIDIAN-RAG-PROTOCOL.md) — full protocol spec (v1.3)
 - [`examples/`](examples/) — three real notes you can run the full loop against in 30 seconds
 
 ## License

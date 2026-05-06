@@ -41,6 +41,7 @@ DEFAULT_INDEX_PATH = "~/.hermes/vault-index.json"
 DEFAULT_MAX_STALE_DAYS = 4
 DEFAULT_MAX_SIZE_KB = 50
 DEFAULT_MIN_ALIAS_LEN = 2
+DEFAULT_MIN_ALIAS_COUNT = 3  # entries with fewer aliases tend to miss real queries
 
 REQUIRED_TOP_LEVEL = ("version", "updated", "entries")
 REQUIRED_ENTRY_FIELDS = ("_content_hash", "path", "aliases")
@@ -60,7 +61,7 @@ def parse_updated(s: str):
 
 
 def check_health(index_path: Path, max_stale_days: int, max_size_kb: int,
-                 min_alias_len: int) -> dict:
+                 min_alias_len: int, min_alias_count: int = DEFAULT_MIN_ALIAS_COUNT) -> dict:
     """Run all checks. Returns a dict with `failures` and `warnings` lists."""
     failures = []
     warnings = []
@@ -99,6 +100,8 @@ def check_health(index_path: Path, max_stale_days: int, max_size_kb: int,
     entries = doc.get("entries", {}) if isinstance(doc.get("entries"), dict) else {}
     short_aliases = []
     orphans = []
+    thin_alias_entries = []  # entries with < min_alias_count aliases
+    alias_counts = []
     for eid, entry in entries.items():
         if not isinstance(entry, dict):
             failures.append(f"entry {eid!r} is not a dict")
@@ -117,6 +120,11 @@ def check_health(index_path: Path, max_stale_days: int, max_size_kb: int,
         for a in aliases:
             if isinstance(a, str) and 0 < len(a) < min_alias_len:
                 short_aliases.append((eid, a))
+        # Soft: thin alias coverage (substring matching needs breadth, not depth)
+        alias_count = len(aliases)
+        alias_counts.append(alias_count)
+        if alias_count < min_alias_count:
+            thin_alias_entries.append((eid, alias_count))
 
     if orphans:
         warnings.append(
@@ -129,6 +137,14 @@ def check_health(index_path: Path, max_stale_days: int, max_size_kb: int,
             f"{len(short_aliases)} aliases shorter than {min_alias_len} chars "
             f"(will be filtered by the reader's noise floor): "
             + ", ".join(f"{eid}:{a!r}" for eid, a in short_aliases[:5])
+        )
+    if thin_alias_entries and alias_counts:
+        avg = sum(alias_counts) / len(alias_counts)
+        warnings.append(
+            f"{len(thin_alias_entries)} entries have fewer than {min_alias_count} aliases "
+            f"(avg across vault: {avg:.1f}). Substring matching needs alias breadth — "
+            f"consider running expand_aliases.py. Sample: "
+            + ", ".join(f"{eid}({n})" for eid, n in thin_alias_entries[:5])
         )
 
     # Soft: index size
@@ -155,6 +171,8 @@ def main():
                         help=f"Warn if index larger than N KB (default: {DEFAULT_MAX_SIZE_KB})")
     parser.add_argument("--min-alias-len", type=int, default=DEFAULT_MIN_ALIAS_LEN,
                         help=f"Warn on aliases shorter than N chars (default: {DEFAULT_MIN_ALIAS_LEN})")
+    parser.add_argument("--min-alias-count", type=int, default=DEFAULT_MIN_ALIAS_COUNT,
+                        help=f"Warn on entries with fewer aliases (default: {DEFAULT_MIN_ALIAS_COUNT})")
     parser.add_argument("--strict", action="store_true",
                         help="Exit non-zero on warnings, not just failures")
     args = parser.parse_args()
@@ -165,6 +183,7 @@ def main():
         max_stale_days=args.max_stale_days,
         max_size_kb=args.max_size_kb,
         min_alias_len=args.min_alias_len,
+        min_alias_count=args.min_alias_count,
     )
 
     failures = result["failures"]
