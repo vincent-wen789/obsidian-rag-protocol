@@ -293,11 +293,92 @@ Or as a CLI for ad-hoc shell glue:
 python3 orp_reader.py status                      # exit 0 / 2 / 3
 python3 orp_reader.py match "Coinbase Japan"      # tab-separated entry_id, path, matched alias
 python3 orp_reader.py get coinbase-japan-analysis # full entry as JSON
+python3 orp_reader.py log --agent cc --action note "msg"  # append v1.4 event to wiki/log.md
+python3 orp_reader.py digest --agent cc           # session-start sync (§5.5)
 ```
 
 Stdlib only. Drop it next to your agent's tooling and wire the match output into whatever read-file call your agent uses.
 
 **Single source of truth tip.** Rather than copying matching rules into your agent's system prompt (where they'll drift over time as the protocol evolves), have the prompt instruct the agent to *call* `orp_reader.py match` and parse the output. Keeps the rules in one place — the reader file — instead of duplicated across every agent's prompt.
+
+---
+
+## Session-Start Digest (v1.4+)
+
+The session-start digest closes the awareness gap that pull-only retrieval left open: when Agent A writes to the vault while Agent B is offline, Agent B never learns about it unless the user happens to mention an aliased keyword. The digest reads `wiki/log.md` from a per-agent byte-offset cursor and prints what's new — see protocol §5.5.
+
+### Wiring it up
+
+**1. Switch agents to write log events through `orp_reader.py log` instead of hand-editing `wiki/log.md`.** This is required for digest cursor parsing to work — hand-edits drift the format. Update each agent's system prompt:
+
+```
+When you finish a substantive vault write or coordination decision worth surfacing
+to the other agent, append a log event:
+
+  python3 ~/.hermes/scripts/orp_reader.py log \
+    --agent <your_id> --action <write|note|done|decision> "<one-line summary>"
+
+Do NOT hand-edit wiki/log.md.
+```
+
+**2. Wire each agent's session-start hook to call `digest`.**
+
+For **Claude Code**, add to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [{
+          "type": "command",
+          "command": "python3 ~/.hermes/scripts/orp_reader.py digest --agent cc",
+          "timeout": 5000
+        }]
+      }
+    ]
+  }
+}
+```
+
+The 5-second timeout is the failure ceiling — if anything goes sideways the hook gets killed and the session starts normally without a digest. Best-effort is the design (§5.5).
+
+For **Hermes Agent**, add to your startup flow (the equivalent of an init hook):
+
+```bash
+python3 ~/.hermes/scripts/orp_reader.py digest --agent hermes
+```
+
+Inject the stdout into the agent's initial context.
+
+**For other agents**, the same pattern: `digest --agent <your_id>` at session start, output into context.
+
+### Verifying
+
+```bash
+# Should print 5 most recent log entries on first run, then create cursor file
+python3 ~/.hermes/scripts/orp_reader.py digest --agent cc
+
+# Second call — should be silent (no new activity since first call)
+python3 ~/.hermes/scripts/orp_reader.py digest --agent cc
+
+# Append a test event
+python3 ~/.hermes/scripts/orp_reader.py log --agent cc --action note "digest verification test"
+
+# Now another agent's first call sees it
+python3 ~/.hermes/scripts/orp_reader.py digest --agent hermes
+```
+
+### Multi-agent forward compatibility
+
+`--agent <id>` accepts any id matching `^[a-z0-9][a-z0-9-]{0,31}$`. Adding a third agent (Codex, Cursor, your own) is three steps:
+
+1. Pick an id (e.g. `codex`).
+2. Have it write log events through `orp_reader.py log --agent codex`.
+3. Wire its session-start hook to call `digest --agent codex`.
+
+No structural vault changes needed. Cursor files at `<vault>/.orp/cursor-<id>.json` are per-agent and don't collide.
 
 ---
 

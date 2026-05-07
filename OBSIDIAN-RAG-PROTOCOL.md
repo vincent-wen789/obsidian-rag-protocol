@@ -1,6 +1,11 @@
 # OBSIDIAN-RAG-PROTOCOL.md
 
-## Version 1.3
+## Version 1.4
+
+Changes from 1.3:
+- §5.2 entry format upgraded — collaboration-log entries now MUST start with a header line of form `🦅[<agent_id>] <ISO8601> · <action> · <one-line summary>`. Pre-v1.4 entries (date-only headers, mixed `·` / `—` separators) are tolerated as legacy; new entries written through `orp_reader.py log` enforce the v1.4 format. Strict format unlocks reliable byte-offset cursor reads (§5.5).
+- §5.5 (new) Session-Start Digest — defines the push side of the protocol. Each agent calls `orp_reader.py digest --agent <id>` at session start; cursor advances by byte offset into `wiki/log.md`. Closes the v1.3 awareness gap where pull-only retrieval missed cross-agent activity that happened between sessions. Best-effort by design — failed digest never blocks agent startup.
+- §11 utilities — `orp_reader.py` adds `log` (event-write CLI agents MUST use, replacing hand-edits) and `digest` subcommands.
 
 Changes from 1.2:
 - §3.4 (new) Alias Quality Maintenance — substring matching needs alias breadth. Empirical floor: 5+ aliases per entry covering project root / EN-CN / concept terms / abbreviations / version anchors. Without it, RAG hit rate stays low on real queries despite "correct" indexing.
@@ -94,7 +99,7 @@ The indexer scans configured subdirectories of the Obsidian vault. Each scan tar
 Files are excluded **by path and filename patterns**, NOT by frontmatter type field. Rationale: frontmatter can be forgotten; path patterns are deterministic.
 
 Default exclusions:
-- Directories: `archived`, `archive`, `log`, `modes`, `tracking`, `task-*`
+- Directories: `archived`, `archive`, `log`, `modes`, `tracking`, `task-*`, `.orp` (digest cursor state, §5.5)
 - Filename patterns: `plan-*`, `*-progress`, `*-data-YYYY-MM`
 - Known non-content: `index.md`, `README.md`
 
@@ -316,7 +321,25 @@ vault/
 
 ### 5.2 Collaboration Channel
 
-A designated file (`wiki/log.md`) acts as the inter-agent communication log. Both agents append entries with format `🦅[Agent] <message>`. This file is NEVER overwritten.
+A designated file (`wiki/log.md`) acts as the inter-agent communication log AND the event stream consumed by the session-start digest (§5.5). Both agents append entries; the file is NEVER overwritten.
+
+**Entry format (v1.4 MUST):**
+
+Each new entry starts with a header line:
+
+```
+🦅[<agent_id>] <ISO8601-with-tz> · <action> · <one-line summary>
+- optional bullet detail
+- optional bullet detail
+```
+
+Where:
+- `<agent_id>` matches `^[a-z0-9][a-z0-9-]{0,31}$` (e.g. `cc`, `hermes`, `codex`). Agent ids map to filenames (cursor files); they MUST be sanitized.
+- `<ISO8601-with-tz>` is a full timestamp with timezone offset, e.g. `2026-05-07T08:30:00+09:00`. Date-only headers from earlier protocol versions are tolerated as legacy but MUST NOT appear in new entries.
+- `<action>` is one of `write`, `note`, `done`, `decision`. The list is closed (extending it is a spec change).
+- `<one-line summary>` is a single line — newlines stripped — that summarizes the event by itself, without requiring the bullets to make sense.
+
+**Agents MUST write through `orp_reader.py log`, never by hand-editing `wiki/log.md`.** The CLI enforces format, agent_id sanitization, and the byte-size invariant below. Hand-editing drifts the format and breaks digest cursor parsing — see §11.
 
 **Hard rules for writers:**
 
@@ -337,6 +360,33 @@ If Agent A needs to write to Agent B's directory:
 ### 5.4 Index Coverage
 
 The vault index must cover both agents' content directories. Entries include `author` field for filtering by agent.
+
+### 5.5 Session-Start Digest
+
+The collaboration channel (§5.2) is append-only and ordered, so an agent can know what changed since it last looked by remembering a byte offset and reading from there. Each agent calls `orp_reader.py digest --agent <id>` at session start; the output is injected into the agent's initial context.
+
+**Why this exists.** Pre-v1.4 retrieval was pull-only — an agent only saw vault changes when the user mentioned a keyword that aliased to a file. Cross-agent activity that happened between sessions was invisible by default. The digest closes that gap without polling, embeddings, or a daemon: it reads the existing log file from a per-agent cursor.
+
+**Cursor.** Each agent has a cursor file at `<vault>/.orp/cursor-<agent_id>.json` with shape `{"log_md_offset": <bytes>, "last_run": "<iso8601>"}`. The cursor advances strictly forward and is per-agent — different agents see digests of the same shared log from their own positions. Cursor files live under a dot-directory so they are excluded from index scans (§2.2).
+
+**Output.** Header lines (lines matching `^(?:## )?🦅\[`) from the cursor offset to EOF, capped at 10 entries on regular calls and 5 on bootstrap. Bullets and other body content are not emitted — header lines are sized to be self-sufficient (§5.2). Truncation prints `... N more entries; run with --full to see all`.
+
+**Bootstrap.** When no cursor file exists for an agent (first run, or after corruption rotation), the digest prints the LAST `BOOTSTRAP_TAIL` (5) header lines from the full log, then sets the cursor to current EOF. This avoids dumping the full history into a new agent's first context.
+
+**Failure semantics — best-effort.** A digest failure MUST NOT block agent startup:
+
+- Vault unavailable → silent exit 0.
+- `wiki/log.md` missing → silent exit 0.
+- Corrupt cursor file → rename to `cursor-<id>.broken-<ts>.json`, fall back to bootstrap, exit 0. (Mirrors §4.3 corrupted-index handling.)
+- Invalid agent id → exit 2 with stderr message (this is a wiring bug, not a runtime fault — should fail loudly).
+
+**Concurrency.** Cursor reads and writes are serialized via `flock(LOCK_EX)` on a per-agent lock file (`cursor-<id>.lock`). Two simultaneous starts of the same agent will not stomp each other's cursor.
+
+**Cursor advance discipline.** The cursor is written to disk only AFTER the digest output has been printed and stdout flushed. A failure between flush and cursor-write is rare but possible (process killed between syscalls); the residual data-loss window is bounded by the harness's stdout-capture window. Agents accept this trade-off — the alternative (two-phase ack) more than doubles the protocol surface for a vanishingly small failure rate.
+
+**Why mtime is NOT used.** Vault file `mtime` is unreliable (iCloud sync touches, git checkout rewrites, bulk renames) — see §2.4. The digest does not scan vault mtimes; it reads only the append-only log, where byte offset is a deterministic and monotonic cursor.
+
+**Multi-agent forward compatibility.** `--agent <id>` accepts any agent id matching the regex above. Adding a third or Nth agent is three steps: pick an id, wire its session-start hook to call `digest --agent <id>`, and ensure it writes log entries through `orp_reader.py log`. No structural vault changes needed. This does not address symmetric-broadcast spam at high agent counts (everyone sees everything) — that is a known v1.4 limitation. Author-aware filtering and per-agent priority are deferred until concrete N≥3 deployments justify them.
 
 ---
 
@@ -480,6 +530,18 @@ Adopters frequently maintain a second index alongside `vault-index.json` for cro
 - **`vault-connectivity.json`** — output of `orp_link_check.py --json`, lists which skills reference which vault files. Lets agents reason about "which skill loads will pull this note as expansion."
 
 These ancillary indexes are out of protocol scope but interoperate cleanly because they sit beside `vault-index.json` and answer adjacent questions.
+
+### 11.5 Session-start digest — `orp_reader.py digest` / `log`
+
+Two subcommands implement the §5.5 push side of the protocol:
+
+- **`orp_reader.py log --agent <id> --action <write|note|done|decision> "<message>"`** — append a v1.4-format event to `wiki/log.md`. Enforces agent-id sanitization, ISO-8601 timestamping, the §5.2 byte-size invariant, and `flock(LOCK_EX)` during write. Agents MUST use this instead of hand-editing the log; hand-edits drift the format and break cursor parsing.
+- **`orp_reader.py digest --agent <id>`** — print log header lines appended since this agent's cursor, advance the cursor, and exit. Best-effort: vault unavailable / log missing → silent exit 0 so a SessionStart hook never blocks startup. Flags: `--bootstrap` (ignore cursor, last 5 entries), `--full` (no cap), `--peek` (read without advancing cursor; useful for debugging).
+
+Recommended invocation points:
+
+- **`digest`** — fire from each agent's session-start hook (e.g. Claude Code `SessionStart` hook in `~/.claude/settings.json`, Hermes startup flow). Output is small (≤10 header lines) and structured for system-prompt injection.
+- **`log`** — call after any vault write or coordination decision worth surfacing to the other agent. Treat it as the agent-side equivalent of a git commit message.
 
 ---
 

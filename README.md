@@ -2,7 +2,7 @@
 
 🌐 [English](README.md) | [中文](README.zh.md) | [日本語](README.ja.md)
 
-Give your AI agent long-term memory by pointing it at your Obsidian vault. No embeddings, no vector DB, fully local.
+Give your AI agent long-term memory by pointing it at your Obsidian vault. **No embeddings, no vector DB, fully local.** As of v1.4, agents sharing one vault also share session-start awareness — when one agent writes, the others see it next session.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Hermes Compatible](https://img.shields.io/badge/Hermes_Agent-Compatible-blue)](https://github.com/nousresearch/hermes-agent)
@@ -148,6 +148,30 @@ The protocol surface is the index, but real ORP setups use the vault bidirection
 
 These aren't part of the protocol contract — they're *applications* of it. Document the triggers your agent should fire, point each at a vault subdirectory, and your second brain accumulates without you copy-pasting. The index picks up the new entries on its next rebuild.
 
+## Session-start sync (v1.4+)
+
+Up to v1.3, ORP was pull-only: the index gets read when the user mentions an aliased keyword. That left a gap. If Hermes wrote a note at 3am while Claude Code was offline, Claude Code had no way to know — until the user happened to ask about it.
+
+v1.4 closes the gap. Each agent calls `orp_reader.py digest --agent <id>` at session start and gets a short list of what's happened in the shared log since it last looked:
+
+```
+[ORP digest · agent=cc · since byte 118402 · 2026-05-07T09:15:00+09:00]
+🦅[hermes] 2026-05-07T03:14:22+09:00 · write · cron-knowledge/timeout-investigation.md — 4 个 aux 模型 timeout 排查
+🦅[hermes] 2026-05-07T08:05:11+09:00 · note · ORP v1.3 alias 批量补全 60 → 58
+🦅[hermes] 2026-05-07T08:30:00+09:00 · done · vault-health-check skill 长期化重写
+```
+
+That's the whole protocol surface for the push side. Implementation:
+
+- `wiki/log.md` is the existing collaboration channel (§5.2). v1.4 standardizes its entry format with ISO-8601 timestamps and a closed action vocabulary so a byte-offset cursor parses cleanly.
+- Each agent has a per-agent cursor at `<vault>/.orp/cursor-<id>.json`. Different agents see digests of the same shared log from their own positions.
+- Agents write to the log with `orp_reader.py log --agent <id> --action <write|note|done|decision> "msg"` — never by hand-editing — so the format stays consistent and the cursor doesn't choke.
+- Best-effort by design: vault unavailable, log missing, corrupt cursor → silent exit 0. A digest failure must not block agent startup.
+
+No mtime scans, no daemon, no polling. The append-only log is the only state. Wiring is one hook per agent — see [INSTALL.md → Session-Start Digest](INSTALL.md#session-start-digest-v14).
+
+Adding a third agent (Codex, Cursor, your own): pick an id, write events through `orp_reader.py log --agent <id>`, wire the session-start hook to call `digest --agent <id>`. No structural vault changes.
+
 ## Compared to alternatives
 
 | Approach | Tradeoff vs ORP |
@@ -161,12 +185,13 @@ ORP wins when you'd rather curate 5 aliases per important note than tune embeddi
 
 ## Status
 
-Spec is at v1.3. The repo ships six single-file Python utilities, all stdlib-only — together about 1,500 lines.
+Spec is at v1.4. The repo ships six single-file Python utilities, all stdlib-only — together about 1,800 lines.
 
 What's running:
 - A 40-ish-entry vault on a single laptop, three months and counting
 - Two agents (Hermes + Claude Code) sharing one vault with separate write directories
 - Daily scheduled rebuild plus staleness-prompt fallback
+- Session-start digest wired into both agents' startup hooks (v1.4)
 
 Honest framing: this is a hand-rolled spec from one user's setup. There are no third-party adopters yet — the spec is offered as something you might find useful, not as a community standard. If you adopt it, file issues; the spec moves with real usage.
 
@@ -178,13 +203,13 @@ Intentionally not done:
 ## Reference
 
 - [`rebuild-vault-index.py`](rebuild-vault-index.py) — single-file indexer
-- [`orp_reader.py`](orp_reader.py) — single-file reader (library + CLI)
+- [`orp_reader.py`](orp_reader.py) — single-file reader (library + CLI: `match` / `get` / `status` + v1.4 `log` / `digest`)
 - [`orp_health.py`](orp_health.py) — schema, freshness, and alias-coverage validator
 - [`orp_link_check.py`](orp_link_check.py) — wikilink integrity scanner (skips fenced code blocks)
 - [`expand_aliases.py`](expand_aliases.py) — bulk frontmatter alias updater (when alias coverage is thin · spec §3.4)
 - [`convert_bare_to_fullpath.py`](convert_bare_to_fullpath.py) — bulk migrate bare wikilinks to full paths (spec §3.5)
-- [`INSTALL.md`](INSTALL.md) — installation, four trigger paths, agent integration
-- [`OBSIDIAN-RAG-PROTOCOL.md`](OBSIDIAN-RAG-PROTOCOL.md) — full protocol spec (v1.3)
+- [`INSTALL.md`](INSTALL.md) — installation, four trigger paths, agent integration, session-start digest wiring
+- [`OBSIDIAN-RAG-PROTOCOL.md`](OBSIDIAN-RAG-PROTOCOL.md) — full protocol spec (v1.4)
 - [`examples/`](examples/) — three real notes you can run the full loop against in 30 seconds
 
 ## License
