@@ -1,5 +1,11 @@
 # OBSIDIAN-RAG-PROTOCOL.md
 
+## Version 1.5
+
+Changes from 1.4.1:
+- §5.6 (new) Auto-log via PostToolUse + Stop hooks — addresses the v1.4 dogfood finding that CC writes vault files but rarely calls `orp_reader.py log` afterwards (0 of ~41 wiki/ changes logged across 7 days; Hermes meanwhile logged 47 entries). Prompt-only enforcement (the §5.2 MUST) failed empirically. v1.5 adds a two-hook mechanism that mechanically captures vault edits and flushes one summary log entry per turn. Optional — agents that already log reliably (like Hermes) don't need it.
+- README repositioned around multi-agent coordination — three independent reviews (Claude agent + Codex + Gemini) flagged that the v1.4 hero ("give your AI agent long-term memory") pattern-matched to the "second-brain category" and made readers misclassify ORP in 5 seconds. v1.5 hero leads with the coordination protocol framing and includes an explicit disqualifier for solo-agent use cases.
+
 ## Version 1.4.1
 
 Changes from 1.4:
@@ -393,6 +399,34 @@ The collaboration channel (§5.2) is append-only and ordered, so an agent can kn
 
 **Multi-agent forward compatibility.** `--agent <id>` accepts any agent id matching the regex above. Adding a third or Nth agent is three steps: pick an id, wire its session-start hook to call `digest --agent <id>`, and ensure it writes log entries through `orp_reader.py log`. No structural vault changes needed. This does not address symmetric-broadcast spam at high agent counts (everyone sees everything) — that is a known v1.4 limitation. Author-aware filtering and per-agent priority are deferred until concrete N≥3 deployments justify them.
 
+### 5.6 Auto-log via Hooks (v1.5+)
+
+§5.2 specifies that agents MUST write log entries through `orp_reader.py log`, never by hand-editing `wiki/log.md`. Dogfood data from v1.4 showed this prompt-level MUST does not hold empirically for chat-oriented agents — Claude Code logged 0 entries across ~41 vault writes in one week, while Hermes (a longer-lived background agent) logged 47 across the same window. Prompt-only enforcement is not enough; the protocol needs an optional mechanical fallback.
+
+§5.6 specifies a two-hook coalescing mechanism that agents MAY implement to capture vault writes deterministically:
+
+**Stager (PostToolUse hook).** Fires after the agent performs an edit on a vault file (e.g. `Edit`, `Write`, `MultiEdit`). If the target path is under the vault root, isn't `wiki/log.md` itself, isn't under `.orp/` or `.obsidian/`, and is a markdown file, the stager appends the vault-relative path to a per-session pending file at `<vault>/.orp/pending/<agent_id>-<session_id>.txt`. The stager itself does NOT call `orp_reader.py log` — it only stages.
+
+**Flusher (Stop hook).** Fires when the agent finishes its turn. Reads the per-session pending file, dedupes paths in-order, and writes ONE summary log entry via `orp_reader.py log --action note` with message format `auto: edited <path>, <path>, ...`. The pending file is cleared atomically after read. If the file list is longer than a small cap (5 by default), the message truncates with a `(+N more)` suffix to keep the entry readable.
+
+**Why one entry per turn, not one per edit:**
+- A single Claude Code turn often Edits the same file multiple times (write → edit → edit). Per-edit logging would spam `wiki/log.md` with mechanical "wrote X" entries and drown the actual signal.
+- Per-turn dedup gives Hermes (or any other agent) a single semantic event to read in its next digest: "CC touched these N files this turn".
+- The `auto:` prefix in the message lets humans and other agents filter visually.
+
+**Why `note` and not `write`:**
+- The hook can't know whether the underlying edit was a meaningful state change or a trivial whitespace fix. `note` is the honest action — "I touched these files", not "I wrote them".
+- Agents can still call `orp_reader.py log --action write/done/decision` manually for semantically richer entries. Both kinds appear in `wiki/log.md`; both surface in the next digest.
+
+**Failure semantics — best-effort.** Like §5.5, hook failures MUST NOT block the agent:
+- Stager exception → silent exit 0 (no pending file written; flusher has nothing to flush).
+- Flusher exception → pending file already cleared, log entry not written. Lossy in the rare race, but bounded.
+- `orp_reader.py` missing / vault path wrong → silent exit 0. Hook scripts read `ORP_VAULT_PATH` and `ORP_READER_PATH` env vars to keep the deployment paths configurable.
+
+**Reference implementation.** `examples/orp-vault-stage.py` and `examples/orp-vault-flush.py` (stdlib only, ~80 lines each). Wired into Claude Code via `~/.claude/settings.json` under `PostToolUse` (matcher `Edit|Write|MultiEdit`) and `Stop` hook events with `timeout: 5` (seconds, per Claude Code hook spec). Agents other than CC can implement equivalent hooks against their own tool-use events; the protocol surface is the pending-file format and the per-turn flush discipline, not the specific hook framework.
+
+**Out of scope for §5.6.** This mechanism does NOT detect "did the agent semantically engage with digest content" (a v1.4 hypothesis called 坑1 that was dropped after 5 days of dogfood produced no measurable evidence). It does NOT detect cross-instance cursor races (deferred). It is purely a compliance mechanism for the §5.2 write-via-CLI rule.
+
 ---
 
 ## 6. Skill ↔ Vault Auto-Expansion (v3.4)
@@ -547,6 +581,36 @@ Recommended invocation points:
 
 - **`digest`** — fire from each agent's session-start hook (e.g. Claude Code `SessionStart` hook in `~/.claude/settings.json`, Hermes startup flow). Output is small (≤10 header lines) and structured for system-prompt injection.
 - **`log`** — call after any vault write or coordination decision worth surfacing to the other agent. Treat it as the agent-side equivalent of a git commit message.
+
+### 11.6 Auto-log hooks — `examples/orp-vault-stage.py` / `orp-vault-flush.py`
+
+Reference implementation of the §5.6 PostToolUse + Stop hook pair. Stager records vault md writes to a per-session pending file; flusher reads pending at turn end and writes one summary log entry via `orp_reader.py log`. Stdlib only, ~80 lines each.
+
+Wiring (Claude Code) — add to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [{
+      "matcher": "Edit|Write|MultiEdit",
+      "hooks": [{
+        "type": "command",
+        "command": "python3 /path/to/orp-vault-stage.py",
+        "timeout": 5
+      }]
+    }],
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 /path/to/orp-vault-flush.py",
+        "timeout": 5
+      }]
+    }]
+  }
+}
+```
+
+Configurable via env vars `ORP_VAULT_PATH` (default `~/Documents/Obsidian Vault`) and `ORP_READER_PATH` (default `~/.hermes/scripts/orp_reader.py`).
 
 ---
 

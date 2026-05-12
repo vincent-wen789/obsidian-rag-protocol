@@ -2,34 +2,99 @@
 
 🌐 [English](README.md) | [中文](README.zh.md) | [日本語](README.ja.md)
 
-Give your AI agent long-term memory by pointing it at your Obsidian vault. **No embeddings, no vector DB, fully local.** As of v1.4, agents sharing one vault also share session-start awareness — when one agent writes, the others see it next session.
+**ORP is a filesystem-native coordination protocol for two or more AI agents sharing one Obsidian vault.** It lets each agent see what other agents did through deterministic note retrieval plus a byte-cursor digest from an append-only `wiki/log.md` — no embeddings, no vector DB, no LLM in the retrieval path.
+
+> **Brutally honest:** if you have one AI agent and want it to curate, rewrite, or "optimize" your vault, this is probably not the tool you want. Use [Karpathy's LLM Wiki pattern](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) or [obsidian-second-brain](https://github.com/eugeniughelbur/obsidian-second-brain) instead. ORP earns its keep when silent drift between agents costs you something real.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Hermes Compatible](https://img.shields.io/badge/Hermes_Agent-Compatible-blue)](https://github.com/nousresearch/hermes-agent)
 [![Obsidian](https://img.shields.io/badge/Obsidian-Powered-7C3AED)](https://obsidian.md)
 
+### Key differentiators
+
+- **Coordination, not curation.** ORP doesn't rewrite your notes or "optimize" your vault. Your content stays yours; ORP only coordinates what agents do around it.
+- **Cross-agent awareness.** A byte-cursor digest at session start tells Agent B exactly what Agent A wrote since last time. No polling, no daemons.
+- **Zero LLM at retrieval.** Deterministic alias substring matching, not embeddings or LLM re-ranking. The index is ~15 KB for 30 notes.
+
 ---
 
 ## The problem
 
-You ask your AI agent, "what did we decide about X last month?" — and it has no idea. You re-explain. Every. Single. Session.
+Two AI agents working on the same Obsidian vault. Last night, Hermes wrote a market analysis to `hermes-knowledge/`. This morning, Claude Code has no idea — until you re-explain. Every. Single. Session.
 
-You already wrote it down in Obsidian. The agent just can't see it.
+The left hand doesn't know what the right hand did. **ORP is the shared blackboard between them.**
+
+(If you have just one agent, this isn't your problem — you want a second-brain tool, not a coordination protocol. See the "Brutally honest" note above.)
 
 ## What it feels like with ORP
 
-```
-You: 我们之前对 Coinbase Japan 的判断是？
+You start a new Claude Code session this morning. Before you've typed anything, this gets auto-injected into the agent's context:
 
-Agent: Based on wiki/career/coinbase-japan-analysis.md
-       (last updated 2026-04-11):
-       • status: archived
-       • 判断: 規制リスク過大、後発参入劣勢明顯
-       • last action: 2026-04-11 写入分析笔记
-       Source: alias "Coinbase" matched.
+```
+[ORP digest · agent=cc · since byte 184459 · 2026-05-12T09:13:15+09:00]
+🦅[hermes] 2026-05-12T07:30 · note · stock-pulse 调研完成并归档
+🦅[hermes] 2026-05-12T07:31 · write · wukong 文学向精读报告 — 8/8 endings 全量覆盖
+🦅[hermes] 2026-05-12T08:46 · write · Oppenheimer 文学精读 v1.3.0 — 7/7 endings
 ```
 
-The agent reads a single ~15KB JSON index, fuzzy-matches your question against aliases you control, and pulls only the matched note. No embeddings. No external service. Nothing leaves your machine.
+Claude Code knows what Hermes did overnight before you say a word. You don't re-explain. The session starts with shared context.
+
+When you ask "what did we decide about X last month?" later in the conversation, ORP's pull side kicks in: the agent fuzzy-matches your keywords against aliases you control and reads only the matched note. ~15 KB JSON index. No embeddings. Nothing leaves your machine.
+
+## How ORP relates to Karpathy's LLM Wiki and obsidian-second-brain
+
+If you're already aware of [Karpathy's LLM Wiki gist](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f) or the [obsidian-second-brain](https://github.com/eugeniughelbur/obsidian-second-brain) Claude Code skill, this section is for you. They live in the same neighborhood — markdown vaults, Obsidian, AI agents — but they solve different problems. ORP is not a replacement for either; it can sit underneath either of them.
+
+### One-line each
+
+- **Karpathy's LLM Wiki** is a *pattern*: an LLM reads sources at ingest time, builds and **maintains** a wiki of interlinked markdown pages. Knowledge is compiled once, then kept current. Single agent + human curates.
+- **obsidian-second-brain** is an *implementation* of that pattern, expanded: 31 commands, scheduled background agents, the wiki **rewrites itself** when new sources arrive, contradictions reconcile automatically. Single Claude Code session + human.
+- **ORP** is a *protocol* for two AI agents to share context across one vault: deterministic alias matching (no embeddings) for retrieval, byte-cursor session-start digest for cross-agent awareness, an append-only log for coordination. Vault content is yours; ORP doesn't rewrite it.
+
+### Where they sit in the stack
+
+```
+┌──────────────────────────────────────────────┐
+│ Application — knowledge synthesis            │
+│ Karpathy's LLM Wiki · obsidian-second-brain  │
+│ (ingest sources, mutate pages, lint, save)   │
+├──────────────────────────────────────────────┤
+│ Coordination — multi-agent state sync        │
+│ ORP                                          │
+│ (digest, log, cursor, alias matching)        │
+├──────────────────────────────────────────────┤
+│ Storage — markdown + git                     │
+│ (Obsidian vault, frontmatter, wikilinks)     │
+└──────────────────────────────────────────────┘
+```
+
+ORP sits below the application layer. obsidian-second-brain could, in principle, run on top of ORP (with each scheduled agent identifying itself via `--agent <id>` and writing log entries through `orp_reader.py log`). Karpathy's pattern is single-agent so coordination doesn't apply — but if you ever ran two agents against a Karpathy-style wiki, ORP's coordination layer would do useful work.
+
+### Side-by-side
+
+| Axis | Karpathy's LLM Wiki | obsidian-second-brain | **ORP** |
+|------|---------------------|----------------------|---------|
+| **What it solves** | Knowledge compounds vs. RAG re-derivation | Vault that maintains itself | Two agents staying in sync over one vault |
+| **Layer** | Application (knowledge) | Application (knowledge) | Coordination (state) |
+| **Agent count** | 1 + human | 1 + human (CC) | 2 (CC + Hermes); extensible |
+| **Mutates vault pages?** | Yes (LLM rewrites at ingest) | Yes, aggressively (rewrites + reconciles) | **No** (append-only log; vault content untouched) |
+| **Retrieval** | LLM at query time | LLM at query time + cached pages | **Deterministic substring alias matching, no LLM, no embeddings** |
+| **Embeddings / vector DB** | Not specified | Optional (Perplexity sonar for research) | **None — by design** |
+| **Awareness primitive** | Read whole wiki / page graph | Auto-loaded `## For future Claude` preambles | Per-agent byte-offset cursor over `log.md` |
+| **Implementation** | A 1500-word gist (idea file) | 31 commands, 4 cron agents, hook system | 6 stdlib Python files (~1800 lines total) |
+| **Multi-agent native?** | No | No | **Yes** |
+
+### When to use what
+
+- **You want one AI to maintain a wiki of your readings/notes that compounds over time.** Use Karpathy's pattern (or obsidian-second-brain if you want it pre-built).
+- **You want one AI to manage your whole second brain — kanban, daily notes, contradiction reconciliation, scheduled agents.** Use obsidian-second-brain.
+- **You have two or more AI agents writing to the same vault and they need to know what each other did.** Use ORP. (Pair it with either of the above if you also want knowledge synthesis.)
+
+### What ORP is not trying to be
+
+- **Not a wiki maintainer.** ORP doesn't summarize sources, doesn't update entity pages, doesn't reconcile contradictions. It's the layer that lets agents coordinate; what they write to the vault is their business.
+- **Not a knowledge compounder.** No LLM-driven page mutation. ORP's append-only log is deliberately the opposite design choice from "wiki rewrites itself" — losing audit trail to gain compactness is a trade we won't make.
+- **Not a Claude Code skill.** ORP is a filesystem protocol any agent can implement (CC and Hermes are reference implementations); skill packages built on top of it are application-layer work.
 
 ## Quick start
 
@@ -172,6 +237,8 @@ No mtime scans, no daemon, no polling. The append-only log is the only state. Wi
 
 Adding a third agent (Codex, Cursor, your own): pick an id, write events through `orp_reader.py log --agent <id>`, wire the session-start hook to call `digest --agent <id>`. No structural vault changes.
 
+**v1.5 update — auto-log via PostToolUse + Stop hooks.** Dogfooding v1.4 showed CC agents reliably miss the "call `orp_reader.py log` after vault writes" rule (0 entries logged across ~41 vault writes in one week, while Hermes logged 47 across the same window). v1.5 ships an optional two-hook mechanism: a PostToolUse stager records each vault edit to a per-session pending file, and a Stop hook flusher writes ONE summary log entry per turn (action `note`, prefix `auto:`). One entry per turn, not per edit — keeps signal tight. Hermes-style background agents that already log reliably don't need it. See [INSTALL.md → Auto-log Hooks](INSTALL.md#auto-log-hooks-v15) and protocol §5.6.
+
 ## Compared to alternatives
 
 | Approach | Tradeoff vs ORP |
@@ -185,13 +252,14 @@ ORP wins when you'd rather curate 5 aliases per important note than tune embeddi
 
 ## Status
 
-Spec is at v1.4. The repo ships six single-file Python utilities, all stdlib-only — together about 1,800 lines.
+Spec is at v1.5. The repo ships six single-file Python utilities (stdlib-only, ~1,900 lines) plus two reference hook scripts.
 
 What's running:
 - A 40-ish-entry vault on a single laptop, three months and counting
 - Two agents (Hermes + Claude Code) sharing one vault with separate write directories
 - Daily scheduled rebuild plus staleness-prompt fallback
 - Session-start digest wired into both agents' startup hooks (v1.4)
+- Auto-log PostToolUse + Stop hooks on the Claude Code side (v1.5) — fixes the empirical "CC writes vault but doesn't log" gap that surfaced in v1.4 dogfood
 
 Honest framing: this is a hand-rolled spec from one user's setup. There are no third-party adopters yet — the spec is offered as something you might find useful, not as a community standard. If you adopt it, file issues; the spec moves with real usage.
 
@@ -199,6 +267,7 @@ Intentionally not done:
 - No semantic / fuzzy-vector search
 - No automated alias generation
 - No GUI / dashboard
+- No wiki self-rewriting (see comparison section — append-only log is a deliberate counter-design to "vault rewrites itself")
 
 ## Reference
 
@@ -208,9 +277,10 @@ Intentionally not done:
 - [`orp_link_check.py`](orp_link_check.py) — wikilink integrity scanner (skips fenced code blocks)
 - [`expand_aliases.py`](expand_aliases.py) — bulk frontmatter alias updater (when alias coverage is thin · spec §3.4)
 - [`convert_bare_to_fullpath.py`](convert_bare_to_fullpath.py) — bulk migrate bare wikilinks to full paths (spec §3.5)
-- [`INSTALL.md`](INSTALL.md) — installation, four trigger paths, agent integration, session-start digest wiring
-- [`OBSIDIAN-RAG-PROTOCOL.md`](OBSIDIAN-RAG-PROTOCOL.md) — full protocol spec (v1.4)
-- [`examples/`](examples/) — three real notes you can run the full loop against in 30 seconds
+- [`examples/orp-vault-stage.py`](examples/orp-vault-stage.py) + [`orp-vault-flush.py`](examples/orp-vault-flush.py) — v1.5 PostToolUse + Stop hook reference impl (spec §5.6)
+- [`INSTALL.md`](INSTALL.md) — installation, four trigger paths, agent integration, session-start digest wiring, auto-log hook wiring
+- [`OBSIDIAN-RAG-PROTOCOL.md`](OBSIDIAN-RAG-PROTOCOL.md) — full protocol spec (v1.5)
+- [`examples/`](examples/) — three real notes you can run the full loop against in 30 seconds, plus the v1.5 hook scripts
 
 ## License
 

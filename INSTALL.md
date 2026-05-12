@@ -382,6 +382,79 @@ No structural vault changes needed. Cursor files at `<vault>/.orp/cursor-<id>.js
 
 ---
 
+## Auto-log Hooks (v1.5+)
+
+Prompt-level `MUST use orp_reader.py log` doesn't hold empirically — chat-oriented agents often forget. v1.5 ships an optional two-hook mechanism that captures vault writes mechanically and flushes one summary log entry per turn. Protocol details in §5.6.
+
+### Wiring it up (Claude Code)
+
+The repo ships reference implementations as `examples/orp-vault-stage.py` and `examples/orp-vault-flush.py`. Copy them to your hooks directory (or reference them in place), then add to `~/.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [{
+      "matcher": "Edit|Write|MultiEdit",
+      "hooks": [{
+        "type": "command",
+        "command": "python3 ~/.claude/hooks/orp-vault-stage.py",
+        "timeout": 5
+      }]
+    }],
+    "Stop": [{
+      "hooks": [{
+        "type": "command",
+        "command": "python3 ~/.claude/hooks/orp-vault-flush.py",
+        "timeout": 5
+      }]
+    }]
+  }
+}
+```
+
+If you already have a `SessionStart` hook for the digest (v1.4 setup), keep it — these are additive.
+
+### Behavior
+
+After deployment:
+1. CC edits a vault `.md` file (any of `Edit` / `Write` / `MultiEdit`)
+2. The stager appends the relative path to `<vault>/.orp/pending/cc-<session_id>.txt`
+3. When CC finishes its turn, the flusher reads the pending file, dedupes, and writes:
+   ```
+   🦅[cc] 2026-05-12T10:30:00+09:00 · note · auto: edited wiki/projects/foo.md, wiki/career/bar.md
+   ```
+4. The pending file is cleared
+
+Hermes (or whichever agent runs next) picks this up on its next `digest --agent hermes` call.
+
+### Configuration
+
+Both hook scripts read env vars:
+- `ORP_VAULT_PATH` — vault root (default `~/Documents/Obsidian Vault`)
+- `ORP_READER_PATH` — path to `orp_reader.py` for the log subcommand (default `~/.hermes/scripts/orp_reader.py`)
+
+Set them in `~/.zshrc` or pass via the hook command if defaults don't match your layout.
+
+### Verifying
+
+After wiring:
+
+```bash
+# Trigger CC to write any vault md file in a test session
+# Then check log.md:
+tail -2 ~/Documents/Vincent\ Obsidian/wiki/log.md
+
+# Should see one fresh `auto:` entry tagged 🦅[cc]
+```
+
+If you see no entry: check `~/Documents/Obsidian\ Vault/.orp/pending/` for stuck pending files (the flusher should have cleared them); verify the Stop hook's timeout is in **seconds** (not milliseconds — a v1.4 docs bug fixed in v1.4.1); run the stager/flusher manually with a piped JSON to isolate failures.
+
+### Not for every agent
+
+Hermes-style background agents that already log reliably don't need this mechanism — it's specifically for chat-oriented agents whose "complete the task, exit" reflex skips the post-write log call. Read §5.6 for the design rationale.
+
+---
+
 ## Verifying It Works
 
 ### 1. Health check
