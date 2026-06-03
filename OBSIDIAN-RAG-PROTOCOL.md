@@ -1,5 +1,15 @@
 # OBSIDIAN-RAG-PROTOCOL.md
 
+## Version 1.7
+
+Changes from 1.6:
+- §7.5 (new) **Index Freshness as a Deployment Obligation** — a deployment MUST keep *every* retrieval index it relies on fresh, not just the primary alias index; if the optional semantic layer is enabled, it carries the same obligation. Freshness MUST be observable (per-index entry count / age / drift) and staleness MUST be machine-checkable (a check that can exit non-zero), with concrete staleness defaults (age ≥ 4 days OR drift > 5% of eligible entries). The protocol owns *what must stay healthy + the check*; the deployment owns *when the refresh runs* (the scheduler stays out of the spec). Driven by a production incident: an unmaintained semantic index silently drifted ~1/3 of the vault out-of-index over ~11 days while retrieval kept returning plausible results.
+- §5.5 — documented the **first concrete N=3 deployment** (`codex` onboarded as a third symmetric read+log agent). N≥3 needs no quorum/leader at directory-partitioned, low-contention scale; the real footgun is a copied per-agent hook left pointing at the *source* agent's `--agent` id (silent cursor clobbering). The §5.5 cursor body now also documents the **3-field sanity check** (`file_size` + tail SHA-1 + `tail_mtime` → `full_rescan` + `⚠`) that shipped in the reference reader at 1.5.1 but was never reflected in the spec body.
+- §5.2 — documented the optional **identity meta trailer** (`‖ meta: session=<sid8> trigger=<cat>:<detail>`) in the entry-format grammar; it shipped in the reference reader at 1.5.1 but the §5.2 body had not described it.
+- §1.5.1 / §1.6 changelog corrections — removed the `source` / `last_verified_at` entity-state-machine claims: neither the §1.2 schema body nor the reference impl ever adopted them. The `status` field is real, but its value set is inconsistent across changelog / schema / reader; reconciling that enum is tracked as a fast-follow, not fixed here.
+
+**Backwards compatibility**: v1.7 is documentation-sync plus one new deployment obligation (index freshness). No schema or log-format migration is required. Alias-only deployments remain compliant; the freshness obligation only adds a second index's worth of monitoring when the optional semantic layer is enabled.
+
 ## Version 1.6
 
 Changes from 1.5.1:
@@ -8,7 +18,7 @@ Changes from 1.5.1:
 - §3.8 (new) **Backlinks Query** — `vault_lookup.py backlinks <target>` stateless cross-namespace wikilink reverse-lookup (no third index). Mixed resolver: accepts basename (`foo`) or vault-relative full path (`wiki/.../foo.md`); recognizes `[[X]]` / `[[X|display]]` / `[[X#heading]]` / `[[X^block]]`. Ambiguous basenames warn. Skips `archived` / `stale` referrers by default. ~0.1s on ~800-entry vault.
 - §3.9 (new) **Embedding Model Versioning** — `vault-vec.about.json` sidecar records `model` / `dim` / `vec_count` / `created_at`. Load-time mismatch detection: **hard** (dim differs) exits with code 2 (fail-closed — prevents silently mixing incompatible spaces); **soft** (same dim, different model name) warns and continues. Closes the "embedding drift after CLI/model rename" failure mode.
 - §3.10 (new) **Stale/Duplicate Report** — `orp_reader.py stale-dedup-report` weekly cron scans entities, flags ones older than `--stale-days` and groups by lowercased title / H1 to surface duplicate candidates. Observational only — outputs markdown to `.orp/reports/stale-dedup-<date>.md`; user decides cleanup. Default Tier-2 hygiene without full memory-consolidation pipeline.
-- §1.2 schema — `status` / `source` / `last_verified_at` are spec-level (formalized from 1.5.1 deployment). Retrieval filters default to `status ∈ {verified, draft, captured}`; `archived` and `stale` require explicit opt-in.
+- §1.2 schema — `status` is spec-level for retrieval filtering; the default filter is `status ∈ {verified, draft, captured}`, with `archived` and `stale` requiring explicit opt-in. *(1.7 correction: the `source` / `last_verified_at` fields originally listed here were never adopted into the §1.2 schema body or the reference impl — claim removed.)*
 - §11 utilities — adds `vault_vec.py` (semantic layer + embedding versioning) and `vault_lookup.py` (unified orchestrator: alias + vec + RRF + backlinks + gap log). `orp_reader.py` adds `stale-dedup-report` subcommand.
 
 **Backwards compatibility**: Pure alias-only ORP deployments (1.5/1.5.1) remain spec-compliant. Semantic + RRF are opt-in upgrades. Existing vault indexes and log files do not need migration.
@@ -16,10 +26,10 @@ Changes from 1.5.1:
 ## Version 1.5.1
 
 Changes from 1.5:
-- §5.2 — collaboration-log entries gain optional **identity meta trailer** of form `‖ meta: session=<sid8> trigger=<cat>:<detail>`. Without it, multi-agent logs were attributable to the agent (header `[<agent_id>]`) but not to the specific session or trigger that caused the write — making "why did X get logged?" answerable only by manual git-blame. Six-enum action taxonomy (`write` / `note` / `done` / `decision` / `intent` / `issue`) enforced via lint, ending the prior free-form-string drift.
+- §5.2 — collaboration-log entries gain optional **identity meta trailer** of form `‖ meta: session=<sid8> trigger=<cat>:<detail>`. Without it, multi-agent logs were attributable to the agent (header `[<agent_id>]`) but not to the specific session or trigger that caused the write — making "why did X get logged?" answerable only by manual git-blame. Four-enum action taxonomy (`write` / `note` / `done` / `decision`) enforced via lint — matching the closed list in §5.2, ending the prior free-form-string drift. (`intent` / `issue` were considered but never adopted into the lint or reference impl; `intent` was tied to the edit-intent soft protocol, later rolled back. The closed list stays four.)
 - §5.5 — per-agent cursor extended with a **3-field sanity check** before incremental read: `file_size` + tail SHA-1 (last 4 KB) + `mtime`. Any mismatch triggers a `full_rescan` from byte 0 and prepends a `⚠ entry` line to the digest so the agent knows the cursor was lost. Pre-fix, log truncation or restore-from-backup would silently rewind cursor reads without warning.
-- §1.2 — schema adds **entity state machine** fields: `status` ∈ {`verified`, `captured`, `draft`, `stale`, `archived`, `blocked`}; `source` (provenance: human-written / agent-derived / external-import / stub); `last_verified_at` (ISO-8601). Default retrieval filter excludes `stale` and `archived`. Closes the 1.5 ambiguity where agent-generated stubs were indistinguishable from human-written canonical notes.
-- §11 — `orp_reader.py` adds `match` (alias substring lookup) + `log` enforcement of 6-enum vocabulary. 217-entity backfill verified during deployment (216 captured + 1 verified).
+- §1.2 — schema gains a lifecycle **`status`** field used by the default retrieval filter (which excludes `stale` and `archived`), reducing the 1.5 ambiguity where agent-generated stubs were indistinguishable from human-written canonical notes. *(1.7 correction: an earlier draft of this entry also listed `source` / `last_verified_at` fields and a six-value `status` enum; those were never adopted into the §1.2 schema body or the reference impl. The `status` value set remains inconsistent across changelog / schema / reader — reconciliation is a tracked fast-follow.)*
+- §11 — `orp_reader.py` adds `match` (alias substring lookup) + `log` enforcement of the closed four-enum action vocabulary (§5.2). 217-entity backfill verified during deployment (216 captured + 1 verified).
 
 ## Version 1.5
 
@@ -333,7 +343,7 @@ This test is intentionally language-agnostic. An LLM agent can apply it directly
 
 - Index file missing → ask user to run rebuild script
 - JSON parse error → "Index corrupted, rebuild?" — do NOT silently skip. The indexer MUST preserve the broken file at `<index-path>.broken-<ts>` rather than overwriting it on the next rebuild.
-- Index stale (>4 days) → offer rebuild, do NOT auto-rebuild
+- Index stale (≥4 days) → offer rebuild, do NOT auto-rebuild
 - Rebuild MUST be atomic — write to a temp file in the same directory and `rename(2)` into place. A reader observing the index path mid-rebuild MUST always see either the previous valid index or the new one, never a partial write.
 
 ---
@@ -360,7 +370,7 @@ A designated file (`wiki/log.md`) acts as the inter-agent communication log AND 
 Each new entry starts with a header line:
 
 ```
-🦅[<agent_id>] <ISO8601-with-tz> · <action> · <one-line summary>
+🦅[<agent_id>] <ISO8601-with-tz> · <action> · <one-line summary> [ ‖ meta: session=<sid8> trigger=<cat>:<detail> ]
 - optional bullet detail
 - optional bullet detail
 ```
@@ -370,6 +380,7 @@ Where:
 - `<ISO8601-with-tz>` is a full timestamp with timezone offset, e.g. `2026-05-07T08:30:00+09:00`. Date-only headers from earlier protocol versions are tolerated as legacy but MUST NOT appear in new entries.
 - `<action>` is one of `write`, `note`, `done`, `decision`. The list is closed (extending it is a spec change).
 - `<one-line summary>` is a single line — newlines stripped — that summarizes the event by itself, without requiring the bullets to make sense.
+- `‖ meta: session=<sid8> trigger=<cat>:<detail>` is an **optional identity trailer** appended by `orp_reader.py log` (v1.5.1+). `session=<sid8>` is the first 8 hex chars of `sha256(<run-id>)` — a PII-safe correlation handle answering "which session wrote this"; `trigger=<category>:<detail>` records what caused the write (e.g. `cron:nightly-scrape`). The trailer is absent on legacy and hand-written entries, and the digest parser ignores it (it sits after the summary), so it never affects cursor reads.
 
 **Agents MUST write through `orp_reader.py log`, never by hand-editing `wiki/log.md`.** The CLI enforces format, agent_id sanitization, and the byte-size invariant below. Hand-editing drifts the format and breaks digest cursor parsing — see §11.
 
@@ -399,7 +410,9 @@ The collaboration channel (§5.2) is append-only and ordered, so an agent can kn
 
 **Why this exists.** Pre-v1.4 retrieval was pull-only — an agent only saw vault changes when the user mentioned a keyword that aliased to a file. Cross-agent activity that happened between sessions was invisible by default. The digest closes that gap without polling, embeddings, or a daemon: it reads the existing log file from a per-agent cursor.
 
-**Cursor.** Each agent has a cursor file at `<vault>/.orp/cursor-<agent_id>.json` with shape `{"log_md_offset": <bytes>, "last_run": "<iso8601>"}`. The cursor advances strictly forward and is per-agent — different agents see digests of the same shared log from their own positions. Cursor files live under a dot-directory so they are excluded from index scans (§2.2).
+**Cursor.** Each agent has a cursor file at `<vault>/.orp/cursors/<agent_id>.json` (the reference reader also accepts the legacy `<vault>/.orp/cursor-<agent_id>.json` path for backward compatibility) with shape `{"log_md_offset": <bytes>, "last_run": "<iso8601>", "file_size": <bytes>, "tail_hash": "<sha1>", "tail_mtime": "<iso8601>"}`. The cursor advances strictly forward and is per-agent — different agents see digests of the same shared log from their own positions. Cursor files live under a dot-directory so they are excluded from index scans (§2.2).
+
+**Cursor sanity check (1.5.1+).** A byte offset is only valid against the exact log it was recorded from. Before an incremental read, the reader compares the cursor's stored `file_size` / `tail_hash` (SHA-1 of the log's trailing bytes) / `tail_mtime` against the log's current values. A mismatch — the log shrank, or its tail no longer hashes to the recorded value — means the offset can no longer be trusted (truncation, restore-from-backup, or an external rewrite). The reader then discards the offset, performs a `full_rescan` from byte 0, and prepends a `⚠` line to the digest so the agent knows its cursor was lost rather than silently rewinding. Pre-1.5.1, a truncated or restored log would silently rewind cursor reads with no warning.
 
 **Output.** Header lines (lines matching `^(?:## )?🦅\[`) from the cursor offset to EOF, capped at 10 entries on regular calls and 5 on bootstrap. Bullets and other body content are not emitted — header lines are sized to be self-sufficient (§5.2). Truncation prints `... N more entries; run with --full to see all`. When truncation happens in regular mode, the **cursor advances only to the byte offset of the first unshown entry**, not to EOF — so the truncated entries appear in the next digest call instead of being permanently dropped (v1.4.1 fix). Bootstrap and `--full` modes still advance cursor to EOF.
 
@@ -416,9 +429,11 @@ The collaboration channel (§5.2) is append-only and ordered, so an agent can kn
 
 **Cursor advance discipline.** The cursor is written to disk only AFTER the digest output has been printed and stdout flushed. A failure between flush and cursor-write is rare but possible (process killed between syscalls); the residual data-loss window is bounded by the harness's stdout-capture window. Agents accept this trade-off — the alternative (two-phase ack) more than doubles the protocol surface for a vanishingly small failure rate.
 
-**Why mtime is NOT used.** Vault file `mtime` is unreliable (iCloud sync touches, git checkout rewrites, bulk renames) — see §2.4. The digest does not scan vault mtimes; it reads only the append-only log, where byte offset is a deterministic and monotonic cursor.
+**Why vault mtime is NOT used for change detection.** Vault file `mtime` is unreliable (iCloud sync touches, git checkout rewrites, bulk renames) — see §2.4. The digest does not scan vault mtimes to decide what changed; it reads only the append-only log, where byte offset is a deterministic and monotonic cursor. (This is distinct from the cursor's `tail_mtime` sanity field above, which records the *log file's* mtime purely as one cheap tamper/restore signal — never as a content-change trigger.)
 
 **Multi-agent forward compatibility.** `--agent <id>` accepts any agent id matching the regex above. Adding a third or Nth agent is three steps: pick an id, wire its session-start hook to call `digest --agent <id>`, and ensure it writes log entries through `orp_reader.py log`. No structural vault changes needed. This does not address symmetric-broadcast spam at high agent counts (everyone sees everything) — that is a known v1.4 limitation. Author-aware filtering and per-agent priority are deferred until concrete N≥3 deployments justify them.
+
+**First concrete N=3 deployment (`codex`, 2026-06).** A third agent — `codex`, OpenAI's CLI used standalone by the operator — was onboarded as a symmetric **read + log** participant: it runs `digest --agent codex` at session start (its own cursor), recalls through the retrieval stack, and writes via `orp_reader.py log --agent codex`. The open N≥3 question (does a third agent require quorum/leader coordination?) resolves to **no** at directory-partitioned, low-contention scale: per-agent cursors, directory partitioning (§5.1), and the append-only concurrency floor (§5.2) already let N agents coexist without consensus machinery. Entity authoring stayed with the two namespace-owning agents (CC → `wiki/`, Hermes → `hermes-knowledge/`); `codex` contributes knowledge as log entries rather than owning a namespace, so partitioning is unaffected and no quorum is introduced. **Onboarding hazard (observed, worth flagging for adopters):** the new agent's hooks were copied verbatim from an existing agent and left every `--agent` id pointing at the *source* agent. The failure was silent — the new agent advanced the source agent's digest cursor (cursor clobbering, so the source agent began missing entries) and auto-logged under the wrong id. A per-agent hook copy MUST have its `--agent <id>` rewritten end to end (session-start digest, PostToolUse stager, Stop flusher). Rewriting the id is necessary but not sufficient: the source agent's cursor was already advanced past entries it never showed, so it MUST also be reset (re-bootstrapped) once the id is fixed — otherwise it stays silently ahead of its true read position and keeps skipping entries even after the id is correct. A mismatched id — not the absence of quorum — is the real N≥3 footgun.
 
 ### 5.6 Auto-log via Hooks (v1.5+)
 
@@ -470,7 +485,7 @@ Agent automatically `read_file`s referenced vault pages in the same turn as skil
 
 ---
 
-## 7. Incremental Rebuild Strategy
+## 7. Incremental Rebuild & Index Freshness
 
 ### 7.1 Core Principle
 
@@ -484,13 +499,25 @@ Content hash comparison drives incremental updates. Only re-extract frontmatter 
 | Yes | No | Full re-extraction from file |
 | No | — | New entry, full extraction |
 
+### 7.3 Change Count
+
+Rebuild output MUST report changed entry count for monitoring. Zero changes = healthy incremental path.
+
 ### 7.4 Cutoff Window
 
 The indexer applies a rolling age cutoff (default 90 days, configurable) to bound the working set. The cutoff MUST NOT drop a file that already has an entry in the previous index — once indexed, an entry stays until the file is removed from the vault or matches an exclusion rule. Otherwise hand-curated aliases for older notes silently disappear after the cutoff window.
 
-### 7.3 Change Count
+### 7.5 Index Freshness as a Deployment Obligation
 
-Rebuild output MUST report changed entry count for monitoring. Zero changes = healthy incremental path.
+This obligation is cross-cutting: it governs *every* index a deployment relies on, not just the incremental-rebuild path above. Retrieval quality degrades silently when an index falls behind the vault, so a deployment **MUST** keep all of its retrieval indexes fresh — not only the primary alias index. If a deployment enables the optional semantic layer, that index carries the **same** freshness obligation as the alias index. An unmaintained secondary index is the most dangerous kind: queries still return *results*, so the degradation is invisible until measured.
+
+> Reference deployment, 2026-06: the alias index had a daily rebuild while the optional semantic index had none. It drifted ~1/3 of vault content out-of-index across ~11 days before anyone noticed — precisely because retrieval kept returning plausible results. The fix was not a new feature but closing the freshness asymmetry: a sibling refresh on the same schedule, plus a staleness check with enough teeth to surface drift.
+
+**Freshness signal.** "Fresh" MUST be observable, not assumed. An implementation MUST expose, per index: entry count, age since last build, and drift. Drift is *eligible-but-missing* content, and each layer's drift MUST be measured against the same eligibility filter (§2.2 / §2.3) that decides what *should* be indexed — on-disk files that qualify for indexing, minus the entries that layer actually holds — never the layer measured against its own last snapshot. (A layer counting only its own snapshot can pass a drift check while silently dropping content the alias layer would have caught — exactly the incident above.) Staleness has concrete defaults: **age ≥ 4 days OR drift > 5% of eligible entries** means stale (defaults; configurable, and aligned with the §4.2 / §4.3 / §11.3 4-day staleness window). The §7.3 change-count is one input to the alias layer's signal — it surfaces churn between rebuilds, not staleness — so a complete signal pairs it with the index's age and drift; §11.1 (`orp_health.py`) is the reference freshness check for the alias layer, and any additional layer needs its own equivalent.
+
+**Staleness MUST be machine-checkable.** Eyeballing freshness does not satisfy this obligation — the production incident above happened precisely because nobody was looking. A compliant deployment MUST be able to check every layer's freshness signal programmatically and get a non-zero / fail result when any layer is stale, so the check can gate CI or block agent startup. A deployment SHOULD roll all layers into a single command for convenience. The reference implementation ships `orp_health.py` (§11.1) as the alias-layer check (`--strict` already exits non-zero on staleness); a multi-layer rollup is a deployment convenience and, per §9 / §11, the specific tool is a reference utility, not the protocol contract — the contract is that staleness is *observable and machine-checkable*, however it is implemented.
+
+**Boundary — what ORP owns vs what the deployment owns.** ORP specifies the freshness *requirement* and the *signal + check* a compliant implementation must be able to produce. ORP does **not** specify the *scheduler*. When and how the refresh runs — cron, launchd, CI job, agent-internal timer, or staleness-prompt (§11.3) — is a deployment choice and MUST NOT be baked into the protocol; doing so over-fits the protocol to one host's infrastructure. Rule of thumb: **the protocol owns "what must stay healthy + the check"; the deployment owns "when the refresh runs."**
 
 ---
 
@@ -540,6 +567,7 @@ To adopt ORP for your agent:
 - [ ] Verify: agent reads vault-index.json on recall-intent queries
 - [ ] Verify: incremental rebuild shows 0 changes when vault is unchanged
 - [ ] Verify: `orp_health.py` exits 0 against the freshly-built index
+- [ ] If using the optional semantic layer: set up its refresh trigger too (§7.5), and verify staleness is machine-checkable — artificially stale the semantic index and confirm your freshness check exits non-zero (mirroring the `orp_health.py exits 0` line above for the alias layer). An unmaintained secondary index degrades retrieval invisibly, so "monitored" only counts if a check can actually fail.
 
 ---
 

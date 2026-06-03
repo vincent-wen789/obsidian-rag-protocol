@@ -244,7 +244,7 @@ v1.4 把这个洞补上。每个 agent 在 session 启动时调一下 `orp_reade
 push 那一面整个协议表面就这么大。实现：
 
 - `wiki/log.md` 还是原来的协作通道（§5.2）。v1.4 给它的 entry 格式定了死：ISO-8601 时间戳 + 闭合的 action 词汇（`write`/`note`/`done`/`decision`），这样 byte offset cursor 能干净解析。
-- 每个 agent 有自己的 cursor 文件 `<vault>/.orp/cursor-<id>.json`，互不干扰。
+- 每个 agent 有自己的 cursor 文件 `<vault>/.orp/cursors/<id>.json`（旧的扁平路径 `cursor-<id>.json` 仍兼容读取），互不干扰。
 - Agent 写 log 走 `orp_reader.py log --agent <id> --action <action> "msg"`——**不能手编辑** `wiki/log.md`，否则格式漂移、cursor 解析炸。
 - 设计上是 best-effort：vault 不可用 / log 不存在 / cursor 损坏 → 静默 exit 0。digest 失败绝不能 block agent 启动。
 
@@ -268,14 +268,14 @@ push 那一面整个协议表面就这么大。实现：
 
 ORP 适合的场景：(a) 有 ≥2 个 agent 往同一个 vault 写东西，(b) 宁愿给重要笔记手写 5 个 alias 也不想调 embedding 切块策略，(c) 想让多数 query 走确定性、把语义当兜底而不是主入口。
 
-## v1.5.1 + v1.6 新功能
+## v1.5.1 → v1.7 新功能
 
 用过老版本想看变化的（术语都用人话解释）：
 
 **v1.5.1 — 跨 agent 协议原语**（2026-05）
-- **Log 条目带身份元数据。** 每条 log 现在能挂上 `session=<id> trigger=<触发类型>`——一周后回头读共享 log，你能知道是 *哪个 agent 的哪个 session* 写的、被什么触发，不只是"哪个 agent"。Action 词汇收敛成 6 个固定值（`write` / `note` / `done` / `decision` / `intent` / `issue`），取代之前的自由文本。
+- **Log 条目带身份元数据。** 每条 log 现在能挂上 `session=<id> trigger=<触发类型>`——一周后回头读共享 log，你能知道是 *哪个 agent 的哪个 session* 写的、被什么触发，不只是"哪个 agent"。Action 词汇收敛成 4 个固定值（`write` / `note` / `done` / `decision`），取代之前的自由文本。
 - **Cursor 自检。** 每个 agent 用一个 byte 偏移量记自己上次读到 log 的哪儿，只增量读新东西。v1.5.1 在读之前先校验这个 cursor 没失效——查文件大小、最后 4 KB 的内容哈希、最后修改时间。任何一个不对（log 被截断、从备份还原、等）→ agent 重新全读 + 在 digest 前加一条 ⚠ 警告，**不会静默回退**。
-- **Note status 字段。** 每个 entity 现在有 `status`（`verified` / `captured` / `draft` / `stale` / `archived` / `blocked`），检索默认跳过 stale + archived。补上 v1.5 时"agent 生成的临时 stub 和人写的正式笔记没法区分"的歧义。
+- **Note status 字段。** 每个 entity 现在有 `status` 字段，检索默认跳过 stale + archived。补上 v1.5 时"agent 生成的临时 stub 和人写的正式笔记没法区分"的歧义。
 
 **v1.6 — 检索 + hygiene**（2026-05）
 - **可选语义兜底。** 当你的提问跟自己写的 alias 偏太远（你想问"AI 复利"但 alias 是"知识图谱"），OpenAI embedding 层兜底救一下这次查询。新 vault 全量 embed 约 $0.023；每次查询约 $0.000001。**始终是可选**——alias-only setup 完全不受影响。
@@ -284,21 +284,27 @@ ORP 适合的场景：(a) 有 ≥2 个 agent 往同一个 vault 写东西，(b) 
 - **Embedding 模型版本管理。** 小的 `vault-vec.about.json` sidecar 记录索引是哪个 embedding model 建的。如果维度变了（换了一个完全不同的模型）索引拒绝加载（fail-closed——不同维度的 embedding 空间不能混）。如果只是名字变了（同维度），warn 一下继续跑。
 - **过期 + 重复报告。** 周度 observational 扫描，输出到 `.orp/reports/stale-dedup-<date>.md`。按年龄和小写标题重合度标 candidate。**ORP 永远不自动改 vault**，你看完 report 自己决定哪些合并、哪些保留。
 
+**v1.7 — 运维进协议本体**（2026-06）
+- **每一个索引都得保持新鲜，不只是主索引。** 踩坑学来的：可选的语义索引悄悄落后 vault ~11 天，而主关键词索引一直是最新的。什么都没报错——搜索照样返回看着像样的答案——所以这个漂移一直没被发现，直到真去量了才暴露。v1.7 把"保持索引新鲜"立成一条明确义务、覆盖你跑的*所有*层，并要求新鲜度检查得有牙：某一层落后时它真的*失败*（非零退出），而不是一个等人去瞄一眼的数字。协议规定*什么*必须保持新鲜、*怎么检查*；*什么时候*刷新（cron / launchd / CI / agent 自带定时器）由你定。
+- **第一个真实的第三 agent（N=3）。** 我们真把 [Codex](https://openai.com/index/openai-codex/) 接成了第三个读写同一 vault 的 agent——而且它直接就工作了。没有 leader 选举、没有 quorum：per-agent cursor + 分目录写本来就 cover 了这个规模下的 N 个 agent。唯一的坑，现在写进文档给采用方：复制别的 agent 的 hook 时，把 `--agent <id>` *每一处*都改掉，否则新 agent 会悄悄推进*另一个* agent 的读取位置，两边都开始漏读条目。
+
 **一个用户 5 天 dogfood 的遥测**（32 次查询 · 2 个 agent · ~800 篇笔记）：**alias 命中 94% · vec 命中 100% · 全 miss 0 · 写冲突 0**。这是单 vault dogfood 数据，**不是通用 benchmark**——但能确认 alias 是主路径、vec 是少数情况下的兜底，**不是反过来**。
 
 ## 状态
 
-协议 v1.6。仓库里 **8 个单文件 Python 工具**（约 3.6k 行 · stdlib + v1.6 vec 层用的可选 `openai` + `tiktoken`）+ 2 个参考 hook 脚本。
+协议 v1.7。仓库里 **8 个单文件 Python 工具**（约 3.6k 行 · stdlib + v1.6 vec 层用的可选 `openai` + `tiktoken`）+ 2 个参考 hook 脚本。
 
 正在跑的：
 - 一个约 800 篇笔记的 vault，单笔记本上跑了 6 个月
-- 两个 agent（Hermes + Claude Code）共享同一 vault，分目录写
+- 两个有命名空间的 agent（Hermes + Claude Code）共享同一 vault、分目录写，外加 Codex 作为只读+log 的第三个 agent（v1.7）
 - 每日定时重建 + stale 自检兜底
 - Session 启动 digest 接入两边 agent 的 startup hook（v1.4）· 身份元数据 + 3 字段 cursor 自检（v1.5.1）
 - Claude Code 端 PostToolUse + Stop 自动 log hooks（v1.5）——补上 v1.4 dogfood 发现的"CC 写 vault 但不 log"缺口
 - Entity 状态机部署 + 217 条 entity 回填（v1.5.1）—— 216 captured + 1 verified
 - 两层检索（alias + 可选 vec + 排序融合）在 CC 侧部署（v1.6）—— 5 天 dogfood：alias 命中 94% · vec 命中 100% · 全 miss 0（caveat：32 次查询、N=2 agent、不是通用 benchmark）
 - Backlinks 查询 · embedding 模型版本管理 · 过期/重复报告 scaffold（v1.6，observational）
+- 跨所有层的索引新鲜度义务 + 多层 staleness 检查门（v1.7）—— 起因是一个可选索引在生产里静默漂移了 ~11 天
+- 第三个 agent（Codex）跟 Hermes、CC 一起读 + log（v1.7）—— N=3 不需要 quorum/leader；hook 复制改 `--agent` id 的坑写在 §5.5
 
 诚实交代：这是从一个用户的真实 setup 长出来的手搓规范。**目前还没有第三方采用方**——这套东西放在这里是"你或许也用得上"，不是"社区标准"。如果你接进来用，欢迎开 issue，spec 会跟着真实使用场景演进。
 
@@ -306,7 +312,7 @@ ORP 适合的场景：(a) 有 ≥2 个 agent 往同一个 vault 写东西，(b) 
 - 没自动 alias 生成—— "alias 覆盖薄"留作人工 curate 的信号
 - 没 GUI / dashboard
 - 没 agent 驱动的 vault 重写（append-only log 是相对于"vault 自我重写"的反向设计选择）
-- 没 N≥3 的 quorum / leader 协议——当前 cursor + log 设计假设 N=2。出现第三个 agent 再说
+- 没 N≥3 的 quorum / leader 协议——v1.7 也证实了不需要：第三个 agent（Codex）已经在生产里跑、不靠这些，因为 per-agent cursor + 分目录写本来就 cover 了这个规模下的 N 个 agent。只有当 agent 数量大到 symmetric-broadcast 刷屏变成真成本时才需要重新考虑
 - 没自动 dedup 清理——v1.6 报告只标 candidate，是否合并由你定
 
 ## 参考资料
@@ -321,7 +327,7 @@ ORP 适合的场景：(a) 有 ≥2 个 agent 往同一个 vault 写东西，(b) 
 - [`convert_bare_to_fullpath.py`](convert_bare_to_fullpath.py) ——批量把 bare wikilink 转成全路径（spec §3.5）
 - [`examples/orp-vault-stage.py`](examples/orp-vault-stage.py) + [`orp-vault-flush.py`](examples/orp-vault-flush.py) ——v1.5 PostToolUse + Stop hook 参考实现（spec §5.6）
 - [`INSTALL.md`](INSTALL.md) ——安装、4 种触发方式、各 agent 接入、session-start digest 接线、auto-log hook 接线
-- [`OBSIDIAN-RAG-PROTOCOL.md`](OBSIDIAN-RAG-PROTOCOL.md) ——完整协议 spec（v1.6）
+- [`OBSIDIAN-RAG-PROTOCOL.md`](OBSIDIAN-RAG-PROTOCOL.md) ——完整协议 spec（v1.7）
 - [`examples/`](examples/) ——3 篇真实笔记 + v1.5 hook 脚本
 
 ## License

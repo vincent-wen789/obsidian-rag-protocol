@@ -244,7 +244,7 @@ v1.4 closes the gap. Each agent calls `orp_reader.py digest --agent <id>` at ses
 That's the whole protocol surface for the push side. Implementation:
 
 - `wiki/log.md` is the existing collaboration channel (§5.2). v1.4 standardizes its entry format with ISO-8601 timestamps and a closed action vocabulary so a byte-offset cursor parses cleanly.
-- Each agent has a per-agent cursor at `<vault>/.orp/cursor-<id>.json`. Different agents see digests of the same shared log from their own positions.
+- Each agent has a per-agent cursor at `<vault>/.orp/cursors/<id>.json` (the legacy flat `cursor-<id>.json` path is still read for backward compatibility). Different agents see digests of the same shared log from their own positions.
 - Agents write to the log with `orp_reader.py log --agent <id> --action <write|note|done|decision> "msg"` — never by hand-editing — so the format stays consistent and the cursor doesn't choke.
 - Best-effort by design: vault unavailable, log missing, corrupt cursor → silent exit 0. A digest failure must not block agent startup.
 
@@ -268,14 +268,14 @@ Adding a third agent (Codex, Cursor, your own): pick an id, write events through
 
 ORP wins when (a) you have ≥2 agents writing to the same vault, (b) you'd rather curate ~5 aliases per important note than tune embedding chunking, and (c) you want most queries to be deterministic with semantic as the safety net, not the primary ranker.
 
-## What's new in v1.5.1 + v1.6
+## What's new in v1.5.1 → v1.7
 
 If you've used ORP before and want to see what changed (jargon explained inline):
 
 **v1.5.1 — cross-agent protocol primitives** (May 2026)
-- **Identity metadata in log entries.** Each log line can now carry `session=<id> trigger=<category>` — so when you read the shared log a week later, you can tell *which* of an agent's sessions wrote each entry, not just *which agent*. Six fixed action types (`write` / `note` / `done` / `decision` / `intent` / `issue`) replace the previous free-form vocabulary.
+- **Identity metadata in log entries.** Each log line can now carry `session=<id> trigger=<category>` — so when you read the shared log a week later, you can tell *which* of an agent's sessions wrote each entry, not just *which agent*. Four fixed action types (`write` / `note` / `done` / `decision`) replace the previous free-form vocabulary.
 - **Cursor sanity check.** Each agent saves a byte-offset cursor into the shared log so it can incrementally read only what's new. v1.5.1 verifies the cursor isn't stale before reading — checks file size, content hash of the last 4 KB, and last-modified time. If anything is off (log was truncated, restored from backup, etc.), the agent does a full re-read and prepends a warning instead of silently rewinding.
-- **Note status field.** Every entity now has a `status` (`verified` / `captured` / `draft` / `stale` / `archived` / `blocked`) so retrieval can default to "skip stale + archived." Closes the v1.5 ambiguity where agent-generated stub notes were indistinguishable from human-written canonical notes.
+- **Note status field.** Every entity now carries a `status` field so retrieval can default to "skip stale + archived" — closing the v1.5 ambiguity where agent-generated stub notes were indistinguishable from human-written canonical ones.
 
 **v1.6 — retrieval + hygiene** (May 2026)
 - **Optional semantic fallback.** When your phrasing diverges from your aliases ("AI compounding" instead of "knowledge graphs"), an OpenAI embedding layer rescues the query. ~$0.023 to embed a fresh 800-note vault; ~$0.000001 per query. Stays opt-in — alias-only setups keep working unchanged.
@@ -284,21 +284,27 @@ If you've used ORP before and want to see what changed (jargon explained inline)
 - **Embedding-model versioning.** A small `vault-vec.about.json` sidecar tracks which embedding model built the index. If the dimension changes (different model entirely), the index won't load (fail-closed — embedding spaces can't mix). If only the model name changes (same dim), you get a warning and the index keeps working.
 - **Stale + duplicate report.** Weekly observational scan into `.orp/reports/stale-dedup-<date>.md`. Flags candidates by age and by lowercased-title overlap. ORP never auto-mutates; you decide what merges and what stays.
 
+**v1.7 — operations as protocol** (June 2026)
+- **Keep *every* index fresh, not just the main one.** Learned the hard way: the optional semantic index quietly fell ~11 days behind the vault while the main keyword index stayed current. Nothing errored — searches kept returning plausible-looking answers — so the drift stayed invisible until it was measured. v1.7 turns "keep the index fresh" into a stated obligation that covers *all* layers you run, and asks for a freshness check with teeth: one that actually *fails* (non-zero exit) when a layer falls behind, instead of a number someone is supposed to eyeball. The protocol says *what* must stay fresh and *how to check it*; *when* the refresh runs (cron, launchd, CI, your agent's own timer) stays your call.
+- **First real third agent (N=3).** We added [Codex](https://openai.com/index/openai-codex/) as a third agent reading and writing the same vault — and it just worked. No leader election, no quorum: per-agent cursors plus separate write directories already cover N agents at this scale. The one gotcha, now written down for adopters: if you copy another agent's hooks, rewrite the `--agent <id>` *everywhere*, or the new agent silently advances the *other* agent's read position and both quietly start missing entries.
+
 **Telemetry from one user's 5-day window** (32 lookups · 2 agents · ~800 notes): **94% alias hit · 100% vec hit · 0 all-miss · 0 write conflicts**. This is single-vault dogfood data, not a general benchmark — but it confirms alias as the primary ranker and vec as the rare-case safety net, not the other way around.
 
 ## Status
 
-Spec is at v1.6. The repo ships **8 single-file Python utilities** (~3.6k lines total: stdlib + optional `openai` + `tiktoken` for the v1.6 vec layer) plus 2 example hook scripts.
+Spec is at v1.7. The repo ships **8 single-file Python utilities** (~3.6k lines total: stdlib + optional `openai` + `tiktoken` for the v1.6 vec layer) plus 2 example hook scripts.
 
 What's running:
 - An ~800-entry vault on a single laptop, six months and counting
-- Two agents (Hermes + Claude Code) sharing one vault with separate write directories
+- Two namespace-owning agents (Hermes + Claude Code) sharing one vault with separate write directories, plus Codex as a read+log third agent (v1.7)
 - Daily scheduled rebuild plus staleness-prompt fallback
 - Session-start digest in both agents' startup hooks (v1.4) · identity meta + 3-field cursor sanity (v1.5.1)
 - Auto-log PostToolUse + Stop hooks on the Claude Code side (v1.5) — fixes the empirical "CC writes vault but doesn't log" gap surfaced in v1.4 dogfood
-- Entity state machine deployed with 217-entity backfill (v1.5.1) — 216 captured + 1 verified
+- `status`-field backfill across 217 entities (v1.5.1) — 216 captured + 1 verified
 - Two-layer retrieval (alias + optional vec + rank fusion) on CC side (v1.6) — 5-day single-vault dogfood: 94% alias hit · 100% vec hit · 0 all-miss (caveat: 32 lookups, N=2 agents, not a general benchmark)
 - Backlinks query · embedding-model versioning · stale/dup report scaffold (v1.6, observational)
+- Index-freshness obligation across all layers + a multi-layer staleness gate (v1.7) — added after an optional index silently drifted ~11 days in production
+- Third agent (Codex) reading + logging alongside Hermes and CC (v1.7) — N=3 with no quorum/leader; the hook-copy `--agent`-id footgun is documented in §5.5
 
 Honest framing: this is a hand-rolled spec from one user's setup. There are no third-party adopters yet — the spec is offered as something you might find useful, not as a community standard. If you adopt it, file issues; the spec moves with real usage.
 
@@ -306,7 +312,7 @@ Intentionally not done:
 - No automated alias generation — "thin alias coverage" stays a human-curation signal
 - No GUI / dashboard
 - No agent-driven vault rewriting (the append-only log is deliberate counter-design to "vault rewrites itself")
-- No N≥3 quorum / leader protocols — current cursor + log design assumes N=2. Will revisit when a third agent appears
+- No N≥3 quorum / leader protocols — and v1.7 confirms that's fine: a third agent (Codex) now runs in production without them, because per-agent cursors + separate write directories already cover N agents at this scale. Revisit only if high agent counts make symmetric-broadcast spam a real cost
 - No automatic dedup cleanup — v1.6 report flags candidates only; the user decides what merges and what stays
 
 ## Reference
@@ -321,7 +327,7 @@ Intentionally not done:
 - [`convert_bare_to_fullpath.py`](convert_bare_to_fullpath.py) — bulk migrate bare wikilinks to full paths (spec §3.5)
 - [`examples/orp-vault-stage.py`](examples/orp-vault-stage.py) + [`orp-vault-flush.py`](examples/orp-vault-flush.py) — v1.5 PostToolUse + Stop hook reference impl (spec §5.6)
 - [`INSTALL.md`](INSTALL.md) — installation, four trigger paths, agent integration, session-start digest wiring, auto-log hook wiring
-- [`OBSIDIAN-RAG-PROTOCOL.md`](OBSIDIAN-RAG-PROTOCOL.md) — full protocol spec (v1.6)
+- [`OBSIDIAN-RAG-PROTOCOL.md`](OBSIDIAN-RAG-PROTOCOL.md) — full protocol spec (v1.7)
 - [`examples/`](examples/) — three real notes you can run the full loop against in 30 seconds, plus the v1.5 hook scripts
 
 ## License
