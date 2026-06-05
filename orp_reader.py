@@ -40,6 +40,12 @@ from typing import Optional
 # Spec defaults — override via CLI flags or VaultIndex constructor.
 STALE_DAYS = 4
 MIN_TOKEN_LEN = 2  # drop single-character tokens to cut noise on substring match
+# Precision guard: a query with ≥COVERAGE_MIN_QUERY_TOKENS tokens must hit
+# ≥COVERAGE_MIN_MATCHES *distinct* tokens per entry, else one common substring
+# token ("in", "hermes") fans out to scores of weakly-related entries. Shorter
+# queries keep single-token matching so "parking" / "ORP status" still resolve.
+COVERAGE_MIN_QUERY_TOKENS = 3
+COVERAGE_MIN_MATCHES = 2
 
 # §5.5 Session-start digest defaults
 DEFAULT_VAULT_ROOT = "~/Documents/Vincent Obsidian"
@@ -62,15 +68,15 @@ ALLOWED_TRIGGERS = frozenset({"hook", "skill", "cron", "manual", "replay", "migr
 # See roadmap.md backlog row + archive/v1.5-plan-cargo-culting-archived.md smell-check.
 
 
-class IndexError(Exception):
+class IndexStateError(Exception):
     """Base class for vault-index state errors."""
 
 
-class IndexMissing(IndexError):
+class IndexMissing(IndexStateError):
     """The vault-index.json file does not exist at the given path."""
 
 
-class IndexCorrupted(IndexError):
+class IndexCorrupted(IndexStateError):
     """The file exists but is not parseable as an ORP index."""
 
 
@@ -187,6 +193,7 @@ def _read_cursor(cursor_path: Path) -> Optional[dict]:
     return {
         "agent": doc.get("agent", "unknown"),
         "byte_offset": offset,
+        "last_entry_ts": doc.get("last_entry_ts"),
         "last_updated": doc.get("last_updated"),
         "file_size": doc.get("file_size"),
         "tail_hash": doc.get("tail_hash"),
@@ -360,28 +367,42 @@ class VaultIndex:
                 continue
         return True  # unparseable → treat as stale
 
-    def match(self, query: str) -> list:
+    def match(self, query: str,
+              min_query_tokens: int = COVERAGE_MIN_QUERY_TOKENS,
+              min_matches: int = COVERAGE_MIN_MATCHES) -> list:
         """Match query against aliases. Returns [(entry_id, entry, alias)].
 
         Per spec §4.2: substring containment, case-insensitive. A query
         token T matches an alias A if T is in A or A is in T. Results
         are sorted by alias length descending so a longer (more specific)
         alias outranks a shorter one. Each entry appears at most once.
+
+        Precision guard: when the query has ≥min_query_tokens tokens, an
+        entry must match ≥min_matches *distinct* query tokens to be kept —
+        this collapses single-token substring fan-out (one token like
+        "in"/"hermes" matching 168/56 entries) while leaving short queries
+        (which keep single-token matching) unchanged. Defaults come from the
+        COVERAGE_MIN_* module constants; override per-call to probe sensitivity.
         """
         tokens = _tokenize(query)
         if not tokens:
             return []
 
-        seen = set()
-        results = []
+        min_cov = min_matches if len(tokens) >= min_query_tokens else 1
+
+        best = {}       # eid -> (alias, entry): longest matching alias (sort is desc)
+        coverage = {}   # eid -> set of distinct query tokens that matched any alias
         for alias, eid, entry in sorted(self._aliases, key=lambda r: -len(r[0])):
-            if eid in seen:
+            hits = [tok for tok in tokens if tok in alias or alias in tok]
+            if not hits:
                 continue
-            for tok in tokens:
-                if tok in alias or alias in tok:
-                    results.append((eid, entry, alias))
-                    seen.add(eid)
-                    break
+            if eid not in best:
+                best[eid] = (alias, entry)
+            coverage.setdefault(eid, set()).update(hits)
+
+        results = [(eid, entry, alias) for eid, (alias, entry) in best.items()
+                   if len(coverage[eid]) >= min_cov]
+        results.sort(key=lambda r: -len(r[2]))
         return results
 
     def get(self, entry_id: str) -> Optional[dict]:
@@ -419,7 +440,7 @@ def cmd_status(args) -> int:
 def cmd_match(args) -> int:
     try:
         idx = VaultIndex.load(args.index)
-    except IndexError as e:
+    except IndexStateError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
     matches = idx.match(args.query)
@@ -434,7 +455,7 @@ def cmd_match(args) -> int:
 def cmd_get(args) -> int:
     try:
         idx = VaultIndex.load(args.index)
-    except IndexError as e:
+    except IndexStateError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 2
     entry = idx.get(args.entry_id)
@@ -682,7 +703,8 @@ def cmd_digest(args) -> int:
             new_tail_hash = _compute_tail_hash(log_path, next_offset)
             _write_cursor(
                 cursor_path,
-                {"byte_offset": next_offset},
+                {"byte_offset": next_offset,
+                 "last_entry_ts": cursor.get("last_entry_ts") if cursor else None},
                 log_size=log_size,
                 tail_hash=new_tail_hash,
                 tail_mtime=log_mtime,

@@ -274,7 +274,7 @@ If you've used ORP before and want to see what changed (jargon explained inline)
 
 **v1.5.1 — cross-agent protocol primitives** (May 2026)
 - **Identity metadata in log entries.** Each log line can now carry `session=<id> trigger=<category>` — so when you read the shared log a week later, you can tell *which* of an agent's sessions wrote each entry, not just *which agent*. Four fixed action types (`write` / `note` / `done` / `decision`) replace the previous free-form vocabulary.
-- **Cursor sanity check.** Each agent saves a byte-offset cursor into the shared log so it can incrementally read only what's new. v1.5.1 verifies the cursor isn't stale before reading — checks file size, content hash of the last 4 KB, and last-modified time. If anything is off (log was truncated, restored from backup, etc.), the agent does a full re-read and prepends a warning instead of silently rewinding.
+- **Cursor sanity check.** Each agent saves a byte-offset cursor into the shared log so it can incrementally read only what's new. v1.5.1 verifies the cursor isn't stale before reading — checks file size, content hash of the last 256 bytes, and last-modified time. If anything is off (log was truncated, restored from backup, etc.), the agent does a full re-read and prepends a warning instead of silently rewinding.
 - **Note status field.** Every entity now carries a `status` field so retrieval can default to "skip stale + archived" — closing the v1.5 ambiguity where agent-generated stub notes were indistinguishable from human-written canonical ones.
 
 **v1.6 — retrieval + hygiene** (May 2026)
@@ -319,7 +319,7 @@ Intentionally not done:
 
 - [`rebuild-vault-index.py`](rebuild-vault-index.py) — single-file indexer
 - [`orp_reader.py`](orp_reader.py) — single-file reader (library + CLI: `match` / `get` / `status` + v1.4 `log` / `digest` + v1.5.1 identity-meta enforcement + v1.6 `stale-dedup-report`)
-- [`vault_vec.py`](vault_vec.py) — **v1.6** optional semantic layer (OpenAI embeddings; `build` / `update` / `search` / `status`; embedding-model versioning sidecar)
+- [`vault_vec.py`](vault_vec.py) — **v1.6** optional semantic layer (OpenAI embeddings; `index` / `update` / `search` / `status`; embedding-model versioning sidecar)
 - [`vault_lookup.py`](vault_lookup.py) — **v1.6** unified retrieval orchestrator (alias + vec + RRF fusion + gap log + `backlinks` query + weekly `review`)
 - [`orp_health.py`](orp_health.py) — schema, freshness, and alias-coverage validator
 - [`orp_link_check.py`](orp_link_check.py) — wikilink integrity scanner (skips fenced code blocks)

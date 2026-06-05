@@ -45,6 +45,15 @@ EMBED_DIM = 1536
 ABOUT_SCHEMA_VERSION = 1
 MAX_TOKENS_PER_FILE = 8000  # model limit is 8192; leave safety margin
 BATCH_SIZE = 64
+
+# §7.5 freshness obligation — semantic-layer staleness thresholds, the
+# vector-index equivalent of orp_health.py's alias-layer check. Stale when
+# age >= STALE_DAYS OR eligible-but-missing drift > DRIFT_PCT_MAX of eligible
+# entries (defaults per spec §7.5; aligned with the §4.2 4-day window).
+# `status --strict` exits non-zero on staleness so it can gate CI / agent start.
+STALE_DAYS = 4
+DRIFT_PCT_MAX = 0.05
+
 EXCLUDE_DIRS = {'.obsidian', '.orp', '.git', '.trash', 'node_modules', '.smart-env'}
 
 # v1.5.1 C3: status filter. Default excludes stale + archived from retrieval.
@@ -224,6 +233,31 @@ def check_model_compat():
     return 'ok', ''
 
 
+def _embed_with_retry(client, texts, *, attempts=5, base_delay=2.0):
+    """Embed `texts`, retrying transient failures with exponential backoff.
+
+    A daily refresh embeds only a handful of changed chunks; a momentary
+    connection blip should ride out, not fail the whole refresh (which pages
+    the operator and leaves the index stale). The SDK's own 2 fast retries
+    proved too short for a real outage window. Backoff here is 2/4/8/16s
+    (~30s total). Re-raises the last error only after every attempt is
+    exhausted, so a genuine outage still propagates and exits non-zero.
+    """
+    last_err = None
+    for attempt in range(1, attempts + 1):
+        try:
+            return client.embeddings.create(model=EMBED_MODEL, input=texts)
+        except Exception as e:
+            last_err = e
+            if attempt == attempts:
+                break
+            delay = base_delay * (2 ** (attempt - 1))
+            print(f'  embed attempt {attempt}/{attempts} failed ({e}); '
+                  f'retry in {delay:.0f}s', file=sys.stderr)
+            time.sleep(delay)
+    raise last_err
+
+
 def build_index(incremental):
     import numpy as np
     from openai import OpenAI
@@ -295,7 +329,7 @@ def build_index(incremental):
         batch = to_embed[batch_start:batch_start + BATCH_SIZE]
         texts = [b[3] for b in batch]
         try:
-            r = client.embeddings.create(model=EMBED_MODEL, input=texts)
+            r = _embed_with_retry(client, texts)
         except Exception as e:
             print(f'ERROR embedding batch {batch_start // BATCH_SIZE + 1}: {e}', file=sys.stderr)
             sys.exit(3)
@@ -381,7 +415,7 @@ def search(query, top_k, threshold, fmt, include_status):
     meta = json.loads(META_PATH.read_text())
 
     try:
-        r = client.embeddings.create(model=EMBED_MODEL, input=[query])
+        r = _embed_with_retry(client, [query])
     except Exception as e:
         print(f'ERROR embedding query: {e}', file=sys.stderr)
         return 3
@@ -434,7 +468,7 @@ def search(query, top_k, threshold, fmt, include_status):
     return 0
 
 
-def status():
+def status(strict=False):
     if not VEC_PATH.exists() or not META_PATH.exists():
         print('index: MISSING', file=sys.stderr)
         return 2
@@ -449,17 +483,32 @@ def status():
         s = m.get('source', 'vault')
         idx_src[s] = idx_src.get(s, 0) + 1
     disk_src = {}
-    for source, _, _ in find_markdown_files():
+    disk_paths = set()
+    for source, abs_path, _ in find_markdown_files():
         disk_src[source] = disk_src.get(source, 0) + 1
+        disk_paths.add(str(abs_path))
+
+    # §7.5 drift = eligible-but-missing, computed BY PATH (set difference) against
+    # the §2.2/§2.3 eligibility filter (find_markdown_files) — NOT a count delta.
+    # A count delta (total_disk - len(meta)) silently nets to zero when a newly
+    # eligible file and a stale/deleted indexed row cancel out, masking the very
+    # add/delete/move drift the gate must catch (spec: "never the layer measured
+    # against its own last snapshot"). Legacy rows without abs_path fall back to
+    # rel_path, which won't match a disk abs path → counted as missing (fail-safe:
+    # over-reports drift, triggering a harmless rebuild, never under-reports).
+    indexed_paths = {m.get('abs_path') or m.get('rel_path') for m in meta}
+    total_disk = len(disk_paths)
+    missing = len(disk_paths - indexed_paths)
+    drift_pct = missing / max(total_disk, 1)
 
     print(f'index: {len(meta)} entries, shape {vecs.shape}, age {age_days:.1f}d')
     print(f'  by source (indexed): ' + ' '.join(f'{k}={v}' for k, v in sorted(idx_src.items())))
     print(f'  by source (on-disk): ' + ' '.join(f'{k}={v}' for k, v in sorted(disk_src.items())))
-    total_disk = sum(disk_src.values())
-    print(f'  drift: {abs(total_disk - len(meta))} files (run `update` to sync)')
+    print(f'  drift: {missing} eligible-but-missing ({drift_pct:.0%} of {total_disk} on disk); run `update` to sync')
 
     # F: embedding model versioning
     about = read_about()
+    level = None
     if about is None:
         print('  model: (no sidecar — pre-v1.6 index, will be written on next build/update)')
     else:
@@ -475,6 +524,24 @@ def status():
             print(f'    ↳ {msg}')
         if about.get('created_at'):
             print(f'  built:  {about.get("created_at")} → updated {about.get("updated_at")}')
+
+    # §7.5 machine-checkable freshness gate. Default is observational (exit 0).
+    # --strict escalates staleness to a non-zero exit so the check can gate CI or
+    # block agent startup — the semantic-layer equivalent of `orp_health.py
+    # --strict` for the alias layer (which §7.5 requires every layer to provide).
+    if strict:
+        reasons = []
+        if age_days >= STALE_DAYS:
+            reasons.append(f'age {age_days:.1f}d >= {STALE_DAYS}d')
+        if drift_pct > DRIFT_PCT_MAX:
+            reasons.append(f'drift {drift_pct:.0%} > {DRIFT_PCT_MAX:.0%}')
+        if level == 'hard':
+            reasons.append('hard embedding-model mismatch (index unusable)')
+        if reasons:
+            print(f'  STALE (--strict): {"; ".join(reasons)} — run `vault_vec.py update`',
+                  file=sys.stderr)
+            return 2
+        print('  fresh (--strict): within §7.5 freshness obligation')
     return 0
 
 
@@ -491,7 +558,11 @@ def main():
     sp.add_argument('--include-status', default=None,
                     help="Comma-separated status whitelist or 'all'. "
                          f"Default: {','.join(sorted(DEFAULT_INCLUDED_STATUS))} (excludes stale/archived)")
-    sub.add_parser('status')
+    sps = sub.add_parser('status')
+    sps.add_argument('--strict', action='store_true',
+                     help='exit non-zero when the index is stale '
+                          f'(age >= {STALE_DAYS}d OR drift > {DRIFT_PCT_MAX:.0%} '
+                          'eligible-but-missing); gates CI / agent startup per §7.5')
     args = ap.parse_args()
 
     if args.cmd == 'index':
@@ -501,7 +572,7 @@ def main():
     if args.cmd == 'search':
         sys.exit(search(args.query, args.top_k, args.threshold, args.format, args.include_status))
     if args.cmd == 'status':
-        sys.exit(status())
+        sys.exit(status(args.strict))
 
 
 if __name__ == '__main__':

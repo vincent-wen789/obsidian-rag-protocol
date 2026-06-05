@@ -13,7 +13,7 @@ Get your AI agent reading your Obsidian vault in 3 steps.
 
 **Optional (v1.6 semantic-fallback layer only)**: if you want the optional `vault_vec.py` semantic retrieval layer + RRF fusion via `vault_lookup.py`:
 - `pip install openai tiktoken` — `openai` for `text-embedding-3-small` API calls, `tiktoken` for token counting before truncation
-- An `OPENAI_API_KEY` in your environment (or `~/.hermes/.env`)
+- An `OPENAI_API_KEY` in your environment (or `~/.hermes/.env` — if you use a key file, restrict it to owner-only: `chmod 600 ~/.hermes/.env`)
 - ~$0.023 one-time to embed a ~800-entry vault; ~$0.000001 per query thereafter
 
 Alias-only deployments (no vec layer) do not need either of these.

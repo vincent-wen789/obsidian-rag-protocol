@@ -274,7 +274,7 @@ ORP 适合的场景：(a) 有 ≥2 个 agent 往同一个 vault 写东西，(b) 
 
 **v1.5.1 — 跨 agent 协议原语**（2026-05）
 - **Log 条目带身份元数据。** 每条 log 现在能挂上 `session=<id> trigger=<触发类型>`——一周后回头读共享 log，你能知道是 *哪个 agent 的哪个 session* 写的、被什么触发，不只是"哪个 agent"。Action 词汇收敛成 4 个固定值（`write` / `note` / `done` / `decision`），取代之前的自由文本。
-- **Cursor 自检。** 每个 agent 用一个 byte 偏移量记自己上次读到 log 的哪儿，只增量读新东西。v1.5.1 在读之前先校验这个 cursor 没失效——查文件大小、最后 4 KB 的内容哈希、最后修改时间。任何一个不对（log 被截断、从备份还原、等）→ agent 重新全读 + 在 digest 前加一条 ⚠ 警告，**不会静默回退**。
+- **Cursor 自检。** 每个 agent 用一个 byte 偏移量记自己上次读到 log 的哪儿，只增量读新东西。v1.5.1 在读之前先校验这个 cursor 没失效——查文件大小、最后 256 字节的内容哈希、最后修改时间。任何一个不对（log 被截断、从备份还原、等）→ agent 重新全读 + 在 digest 前加一条 ⚠ 警告，**不会静默回退**。
 - **Note status 字段。** 每个 entity 现在有 `status` 字段，检索默认跳过 stale + archived。补上 v1.5 时"agent 生成的临时 stub 和人写的正式笔记没法区分"的歧义。
 
 **v1.6 — 检索 + hygiene**（2026-05）
@@ -300,7 +300,7 @@ ORP 适合的场景：(a) 有 ≥2 个 agent 往同一个 vault 写东西，(b) 
 - 每日定时重建 + stale 自检兜底
 - Session 启动 digest 接入两边 agent 的 startup hook（v1.4）· 身份元数据 + 3 字段 cursor 自检（v1.5.1）
 - Claude Code 端 PostToolUse + Stop 自动 log hooks（v1.5）——补上 v1.4 dogfood 发现的"CC 写 vault 但不 log"缺口
-- Entity 状态机部署 + 217 条 entity 回填（v1.5.1）—— 216 captured + 1 verified
+- `status` 字段回填覆盖 217 条 entity（v1.5.1）—— 216 captured + 1 verified
 - 两层检索（alias + 可选 vec + 排序融合）在 CC 侧部署（v1.6）—— 5 天 dogfood：alias 命中 94% · vec 命中 100% · 全 miss 0（caveat：32 次查询、N=2 agent、不是通用 benchmark）
 - Backlinks 查询 · embedding 模型版本管理 · 过期/重复报告 scaffold（v1.6，observational）
 - 跨所有层的索引新鲜度义务 + 多层 staleness 检查门（v1.7）—— 起因是一个可选索引在生产里静默漂移了 ~11 天
@@ -319,7 +319,7 @@ ORP 适合的场景：(a) 有 ≥2 个 agent 往同一个 vault 写东西，(b) 
 
 - [`rebuild-vault-index.py`](rebuild-vault-index.py) ——单文件 indexer
 - [`orp_reader.py`](orp_reader.py) ——单文件 reader（库 + CLI：`match` / `get` / `status` + v1.4 `log` / `digest` + v1.5.1 身份元数据强制 + v1.6 `stale-dedup-report`）
-- [`vault_vec.py`](vault_vec.py) —— **v1.6** 可选语义层（OpenAI embedding；`build` / `update` / `search` / `status`；带 embedding 模型版本管理 sidecar）
+- [`vault_vec.py`](vault_vec.py) —— **v1.6** 可选语义层（OpenAI embedding；`index` / `update` / `search` / `status`；带 embedding 模型版本管理 sidecar）
 - [`vault_lookup.py`](vault_lookup.py) —— **v1.6** 统一检索 orchestrator（alias + vec + 排序融合 + gap log + `backlinks` 查询 + 周度 `review`）
 - [`orp_health.py`](orp_health.py) ——schema、新鲜度、alias 覆盖度校验
 - [`orp_link_check.py`](orp_link_check.py) ——wikilink 完整性扫描（跳过 fenced code block）
