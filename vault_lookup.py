@@ -321,7 +321,7 @@ def resolve_target(target):
 
 def find_backlinks(target_info, include_status=None):
     """Scan vault for [[...]] referring to target. Returns list of referrers."""
-    from vault_vec import VAULT, EXCLUDE_DIRS, extract_status  # type: ignore[import-not-found]
+    from vault_vec import VAULT, EXCLUDE_DIRS, extract_status, DEFAULT_INCLUDED_STATUS  # type: ignore[import-not-found]
 
     basename = target_info['basename']
     canonical_set = set(target_info['canonical_paths'])
@@ -332,7 +332,11 @@ def find_backlinks(target_info, include_status=None):
     elif include_status:
         allowed = {s.strip().lower() for s in include_status.split(',') if s.strip()}
     else:
-        allowed = {'verified', 'draft'}
+        # Default: the §1.2 live set (captured/candidate/verified/retrievable) — skip
+        # archived/stale. extract_status maps missing/unrecognized → captured (live), so
+        # un-statused referrers stay included. v1.7.1: was {'verified','draft'} ('draft'
+        # is not a valid §1.2 status, and it dropped captured/candidate/retrievable).
+        allowed = set(DEFAULT_INCLUDED_STATUS)
 
     referrers = []
     for abs_p, rel in _walk_vault(VAULT, EXCLUDE_DIRS):
@@ -549,7 +553,7 @@ def main():
     bp = sub.add_parser('backlinks', help='Find vault notes that link to <target>')
     bp.add_argument('target', help="Basename ('foo') or vault-rel path ('wiki/foo.md')")
     bp.add_argument('--include-status', default=None,
-                    help="'all' or comma-list (default: verified,draft — skip archived/stale)")
+                    help="'all' or comma-list (default: live statuses captured,candidate,verified,retrievable — skip archived/stale)")
     bp.add_argument('--format', choices=['paths', 'json'], default='paths')
 
     rp = sub.add_parser('review', help='Summarize gap log for alias improvement')
