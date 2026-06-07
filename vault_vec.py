@@ -57,14 +57,16 @@ DRIFT_PCT_MAX = 0.05
 EXCLUDE_DIRS = {'.obsidian', '.orp', '.git', '.trash', 'node_modules', '.smart-env'}
 
 # v1.5.1 C3: status filter. Default excludes stale + archived from retrieval.
-# Files without `status:` frontmatter default to 'verified' (retrievable).
+# Files without (or with unrecognized) `status:` frontmatter default to 'captured':
+# live (retrievable) and honest (not claiming verification). v1.7.1 reconciliation —
+# keeps this semantic layer in agreement with the alias layer (orp_reader.DEFAULT_STATUS).
 ALL_STATUS_VALUES = frozenset({
     'captured', 'candidate', 'verified', 'retrievable', 'stale', 'archived'
 })
 DEFAULT_INCLUDED_STATUS = frozenset({
     'captured', 'candidate', 'verified', 'retrievable'
 })
-DEFAULT_FALLBACK_STATUS = 'verified'  # for files without frontmatter status field
+DEFAULT_FALLBACK_STATUS = 'captured'  # for files without frontmatter status field
 
 _FRONTMATTER_STATUS_RE = re.compile(r'^status:\s*(\S+)', re.MULTILINE)
 
@@ -147,7 +149,8 @@ def extract_headers(text, max_n=3):
 
 
 def extract_status(path_or_text):
-    """Parse YAML frontmatter for `status:` field. Defaults to 'verified'.
+    """Parse YAML frontmatter for `status:` field. Missing or unrecognized → 'captured'
+    (see DEFAULT_FALLBACK_STATUS).
 
     Accepts either a Path (reads first 4KB) or a text string. Used by both
     indexing (per-file) and lookups (re-parsed if meta missing).
@@ -171,7 +174,7 @@ def extract_status(path_or_text):
         return DEFAULT_FALLBACK_STATUS
     val = m.group(1).strip().strip('"').strip("'").rstrip(',').lower()
     if val not in ALL_STATUS_VALUES:
-        return DEFAULT_FALLBACK_STATUS  # unrecognized → treat as verified, don't filter
+        return DEFAULT_FALLBACK_STATUS  # unrecognized → treat as captured (live), don't filter
     return val
 
 

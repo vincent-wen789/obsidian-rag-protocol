@@ -34,6 +34,16 @@ from typing import Optional
 PROTOCOL_VERSION = "1.1"
 
 
+# §1.2 status enum. `unknown` is NOT a member (it was a pre-1.7.1 fallback bug). A note
+# with no, empty, or unrecognized `status` defaults to `captured`: live (retrievable,
+# never silently dropped) and honest (not claiming verification). v1.7.1 reconciliation
+# keeps this alias indexer in agreement with orp_reader.DEFAULT_STATUS / vault_vec.
+ALL_STATUS_VALUES = frozenset({
+    "captured", "candidate", "verified", "retrievable", "stale", "archived"
+})
+DEFAULT_STATUS = "captured"
+
+
 # ═══════════════════════════════════════════════════
 # CONFIGURATION — Edit these for your vault
 # ═══════════════════════════════════════════════════
@@ -187,7 +197,10 @@ def extract_summary(fm: dict, body: str) -> dict:
     """Build structured summary from frontmatter, with plain-text fallback."""
     summary = {}
 
-    summary["status"] = fm.get("status", "unknown")
+    # No, empty, or unrecognized `status:` → `captured` (see ALL_STATUS_VALUES above
+    # and spec §2.6). `unknown` was a pre-1.7.1 fallback that fell outside the §1.2 enum.
+    _s = (fm.get("status") or "").strip().lower()
+    summary["status"] = _s if _s in ALL_STATUS_VALUES else DEFAULT_STATUS
 
     if "version" in fm:
         summary["version"] = fm["version"]

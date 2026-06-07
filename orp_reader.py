@@ -876,6 +876,13 @@ _ENTITY_UPDATED_RE = re.compile(r'^updated:\s*(\d{4}-\d{2}-\d{2})', re.MULTILINE
 _ENTITY_H1_RE = re.compile(r'^#\s+(.+?)$', re.MULTILINE)
 
 STATUS_LIVE = frozenset({"captured", "candidate", "verified", "retrievable"})
+# Full §1.2 status enum. `unknown` is NOT a member — it was a pre-1.7.1 fallback bug.
+ALL_STATUS = STATUS_LIVE | frozenset({"stale", "archived"})
+# Files with no (or unrecognized) `status:` frontmatter default to `captured`:
+# live (retrievable, never silently dropped) and honest (not claiming verification).
+# Matches the v1.5.1 deployment backfill (216 captured + 1 verified) and keeps the
+# alias + semantic layers in agreement on un-statused notes (v1.7.1 reconciliation).
+DEFAULT_STATUS = "captured"
 
 
 def _parse_entity_for_report(path: Path):
@@ -888,7 +895,7 @@ def _parse_entity_for_report(path: Path):
         mtime = path.stat().st_mtime
     except OSError:
         return None
-    out = {"path": path, "mtime": mtime, "status": "verified",
+    out = {"path": path, "mtime": mtime, "status": DEFAULT_STATUS,
            "title": None, "updated_date": None, "h1": None}
     if head.startswith('---'):
         end = head.find('\n---', 3)
@@ -896,7 +903,8 @@ def _parse_entity_for_report(path: Path):
             fm = head[3:end]
             ms = _ENTITY_STATUS_RE.search(fm)
             if ms:
-                out["status"] = ms.group(1).strip().strip('"').strip("'").rstrip(',').lower()
+                val = ms.group(1).strip().strip('"').strip("'").rstrip(',').lower()
+                out["status"] = val if val in ALL_STATUS else DEFAULT_STATUS
             mt = _ENTITY_TITLE_RE.search(fm)
             if mt:
                 out["title"] = mt.group(1).strip().strip('"').strip("'")
