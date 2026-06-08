@@ -48,7 +48,26 @@ COVERAGE_MIN_QUERY_TOKENS = 3
 COVERAGE_MIN_MATCHES = 2
 
 # §5.5 Session-start digest defaults
-DEFAULT_VAULT_ROOT = "~/Documents/Vincent Obsidian"
+
+
+def _default_vault_root():
+    """Vault root default WITHOUT committing a personal path. ORP_VAULT_PATH
+    env (set via ~/.claude/settings.json for CC sessions), else the
+    ORP_VAULT_PATH= line in ~/.hermes/.env (covers contexts where that env
+    isn't injected), else a generic '~/Obsidian'. Deployments override via
+    --vault or the env; no '/Users/<name>/...' is committed."""
+    p = os.environ.get('ORP_VAULT_PATH')
+    if not p:
+        env_file = Path.home() / '.hermes' / '.env'
+        if env_file.exists():
+            for line in env_file.read_text().splitlines():
+                if line.startswith('ORP_VAULT_PATH='):
+                    p = line.split('=', 1)[1].strip().strip('"').strip("'")
+                    break
+    return p or "~/Obsidian"
+
+
+DEFAULT_VAULT_ROOT = _default_vault_root()
 DEFAULT_LOG_REL = "wiki/log.md"
 DEFAULT_CURSOR_REL = ".orp"  # vault-relative dot-dir, excluded from index by default
 DEFAULT_TELEMETRY_REL = ".orp/telemetry.jsonl"  # local dogfood tracker (Vincent's fork)

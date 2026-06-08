@@ -41,7 +41,33 @@ def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
     return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
 socket.getaddrinfo = _ipv4_getaddrinfo
 
-VAULT = Path(os.environ.get('ORP_VAULT_PATH', '/Users/vincentwen/Documents/Vincent Obsidian'))
+
+def _resolve_vault_path():
+    """Resolve the Obsidian vault root WITHOUT committing a personal path.
+
+    Order (resolved at import, so it must not depend on the caller's env):
+      1. ORP_VAULT_PATH env var — set via ~/.claude/settings.json for CC
+         sessions (mirrors how OPENAI_API_KEY arrives there).
+      2. ORP_VAULT_PATH= line in ~/.hermes/.env — covers the launchd cron,
+         where the settings.json env is NOT injected (same fallback file
+         load_env() reads for the API key). This is the load-bearing path:
+         without it the daily orp-vec-refresh would resolve the generic
+         default and index the wrong directory.
+      3. ~/Obsidian — generic default for a fresh checkout; real deployments
+         override via (1) or (2). No `/Users/<name>/...` is ever committed.
+    """
+    p = os.environ.get('ORP_VAULT_PATH')
+    if not p:
+        env_file = Path.home() / '.hermes' / '.env'
+        if env_file.exists():
+            for line in env_file.read_text().splitlines():
+                if line.startswith('ORP_VAULT_PATH='):
+                    p = line.split('=', 1)[1].strip().strip('"').strip("'")
+                    break
+    return Path(p).expanduser() if p else (Path.home() / 'Obsidian')
+
+
+VAULT = _resolve_vault_path()
 MEMORY_ROOT = Path.home() / '.claude' / 'projects'  # */memory/*.md
 DATA_DIR = Path.home() / '.claude' / 'data' / 'vault-vec'
 VEC_PATH = DATA_DIR / 'vault-vec.npy'
