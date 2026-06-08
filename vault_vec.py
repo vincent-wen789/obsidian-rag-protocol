@@ -28,9 +28,18 @@ import hashlib
 import json
 import os
 import re
+import socket
 import sys
 import time
 from pathlib import Path
+
+# macOS IPv6 fix: force IPv4 for all DNS resolution.
+# api.openai.com (Cloudflare) sometimes returns AAAA records; httpx tries IPv6
+# first, but macOS IPv6出口经常不通 → "Connection error". Same fix as pulse.py.
+_orig_getaddrinfo = socket.getaddrinfo
+def _ipv4_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    return _orig_getaddrinfo(host, port, socket.AF_INET, type, proto, flags)
+socket.getaddrinfo = _ipv4_getaddrinfo
 
 VAULT = Path(os.environ.get('ORP_VAULT_PATH', '/Users/vincentwen/Documents/Vincent Obsidian'))
 MEMORY_ROOT = Path.home() / '.claude' / 'projects'  # */memory/*.md
@@ -236,16 +245,36 @@ def check_model_compat():
     return 'ok', ''
 
 
-def _embed_with_retry(client, texts, *, attempts=5, base_delay=2.0):
+def _resolve_embed_attempts():
+    """Honor ORP_EMBED_MAX_RETRIES env var (daily cron passes 3 to cap the
+    retry wall-clock at 14s; weekly full rebuild keeps the default of 7 ≈
+    4.2min — only the full rebuild needs that much patience because it's
+    the line of defense against iCloud-induced silent content drift).
+    Returns int. Falls back to 7 on any parse error.
+    """
+    raw = os.environ.get('ORP_EMBED_MAX_RETRIES', '').strip()
+    if not raw:
+        return 7
+    try:
+        n = int(raw)
+        return n if n >= 1 else 7
+    except ValueError:
+        return 7
+
+
+def _embed_with_retry(client, texts, *, attempts=None, base_delay=2.0):
     """Embed `texts`, retrying transient failures with exponential backoff.
 
-    A daily refresh embeds only a handful of changed chunks; a momentary
-    connection blip should ride out, not fail the whole refresh (which pages
-    the operator and leaves the index stale). The SDK's own 2 fast retries
-    proved too short for a real outage window. Backoff here is 2/4/8/16s
-    (~30s total). Re-raises the last error only after every attempt is
-    exhausted, so a genuine outage still propagates and exits non-zero.
+    Default `attempts` is resolved at call time from ORP_EMBED_MAX_RETRIES
+    (or 7 if unset). The daily cron uses 3 (2/4/8s = 14s cap) so a hard
+    outage fails fast and trips the wrapper's circuit breaker instead of
+    burning 4.2min. The weekly full rebuild keeps 7 because the longer
+    horizon is what bounds iCloud-induced silent content drift to ≤7d.
     """
+    if attempts is None:
+        attempts = _resolve_embed_attempts()
+    base = str(getattr(client, 'base_url', None) or
+               os.environ.get('OPENAI_BASE_URL') or 'https://api.openai.com/v1')
     last_err = None
     for attempt in range(1, attempts + 1):
         try:
@@ -255,8 +284,9 @@ def _embed_with_retry(client, texts, *, attempts=5, base_delay=2.0):
             if attempt == attempts:
                 break
             delay = base_delay * (2 ** (attempt - 1))
-            print(f'  embed attempt {attempt}/{attempts} failed ({e}); '
-                  f'retry in {delay:.0f}s', file=sys.stderr)
+            print(f'  embed attempt {attempt}/{attempts} failed at {base} '
+                  f'({type(e).__name__}: {e}); retry in {delay:.0f}s',
+                  file=sys.stderr)
             time.sleep(delay)
     raise last_err
 
@@ -266,7 +296,8 @@ def build_index(incremental):
     from openai import OpenAI
 
     load_env()
-    client = OpenAI()
+    # Explicit base_url to bypass empty OPENAI_BASE_URL env var pollution
+    client = OpenAI(timeout=30.0, base_url="https://api.openai.com/v1")
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     existing = {}
@@ -334,7 +365,7 @@ def build_index(incremental):
         try:
             r = _embed_with_retry(client, texts)
         except Exception as e:
-            print(f'ERROR embedding batch {batch_start // BATCH_SIZE + 1}: {e}', file=sys.stderr)
+            print(f'ERROR embedding batch {batch_start // BATCH_SIZE + 1} after retries: {e}', file=sys.stderr)
             sys.exit(3)
         total_tokens += r.usage.total_tokens
         for (source, abs_path, disp, text, mtime, size), data in zip(batch, r.data):
@@ -413,7 +444,7 @@ def search(query, top_k, threshold, fmt, include_status):
     filter_active = allowed != ALL_STATUS_VALUES
 
     load_env()
-    client = OpenAI()
+    client = OpenAI(timeout=30.0, base_url="https://api.openai.com/v1")
     vecs = np.load(VEC_PATH)
     meta = json.loads(META_PATH.read_text())
 

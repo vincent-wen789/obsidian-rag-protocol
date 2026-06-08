@@ -166,19 +166,36 @@ def run_vault_vec(query, top_k, threshold, include_status=None):
 
 # ---------- Gap logger ----------
 
-def log_outcome(query, alias, vec, gap):
+OVERBROAD_MIN = 30   # alias_count >= this → query fanned out too wide (precision signal)
+
+
+def log_outcome(query, alias, vec, gap, fused=None):
     """Append a JSONL line. Never crashes — logging best-effort."""
     try:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
+        alias_count = len(alias['hits'])
         record = {
             'ts': datetime.now(timezone.utc).isoformat(timespec='seconds'),
             'query': query,
             'alias_exit': alias['exit'],
-            'alias_count': len(alias['hits']),
+            'alias_count': alias_count,
             'alias_labels': [h.get('label', '') for h in alias['hits'][:5] if h.get('label')],
             'vec_count': len(vec['hits']),
             'gap': gap,
+            # precision instrumentation: over-broad alias fan-out is the dominant
+            # failure mode the gap flag (alias-miss only) is structurally blind to.
+            'alias_overbroad': alias_count >= OVERBROAD_MIN,
         }
+        # Record fused top-3 on EVERY line (not just gap lines) so retrieval
+        # quality (top-k, not just hit/miss) is measurable from the log alone.
+        # `is not None` not truthiness: an all-miss line (fused == []) still gets
+        # `fused_top3: []` so the schema is consistent across every record.
+        if fused is not None:
+            record['fused_top3'] = [
+                {'rrf_score': round(e.get('rrf_score', 0), 5),
+                 'sources': e.get('sources'), 'path': e.get('path')}
+                for e in fused[:3]
+            ]
         if gap and vec['hits']:
             record['vec_winners'] = [
                 {'score': h.get('score'), 'path': h.get('path'),
@@ -212,7 +229,7 @@ def cmd_search(query, top_k, threshold, no_log, fmt, include_status=None):
     fused = fuse_results(alias['hits'], vec['hits'], top_k)
 
     if not no_log:
-        log_outcome(query, alias, vec, gap)
+        log_outcome(query, alias, vec, gap, fused)
 
     result = {
         'query': query,
@@ -537,6 +554,247 @@ def cmd_status():
     return 0
 
 
+# ---------- doctor command (unified health rollup) ----------
+#
+# ORP has 3 maintained retrieval/telemetry subsystems that previously each had
+# their own `status` command (vault_lookup / vault_vec / orp_reader). Checking
+# health meant running 3 separate commands — the fragmentation that let the vec
+# layer silently rot 10.8d (2026-06-03 checkpoint). `doctor` rolls all 3 into one
+# read with staleness thresholds, so degradation is visible at a glance.
+#
+# Boundary note (v1.7 design principle): ORP owns the health CONTRACT + the
+# refresh COMMANDS; the deployment layer (Hermes cron / launchd) owns WHEN they
+# run. doctor is the alarm; the scheduled `vault_vec.py update` is the auto-fix.
+
+VEC_AGE_WARN_DAYS = 3.0       # vec index older than this → stale (vault drifts ~1/3 per 10d)
+VEC_DRIFT_WARN = 25          # |on-disk − indexed| files before flagging drift
+ALIAS_AGE_WARN_HOURS = 36.0   # alias index rebuilds daily; >36h = a rebuild was missed
+GAP_ALLMISS_WARN = 0.05       # 7d all_miss rate above this → retrieval degrading
+GAP_OVERBROAD_WARN = 0.20     # 7d over-broad (alias_count≥OVERBROAD_MIN) rate above this → alias precision degrading
+
+
+def _vec_health():
+    """Vec/semantic layer health via direct import (no numpy load, no API)."""
+    out = {'layer': 'vec', 'ok': True}
+    try:
+        import vault_vec as vv
+    except Exception as e:
+        return {'layer': 'vec', 'ok': False, 'error': f'import vault_vec failed: {e}'}
+    if not vv.VEC_PATH.exists() or not vv.META_PATH.exists():
+        return {'layer': 'vec', 'ok': False, 'error': 'index missing (run `vault_vec.py index`)'}
+    try:
+        meta = json.loads(vv.META_PATH.read_text())
+        out['entries'] = len(meta)
+        out['age_days'] = (time.time() - vv.VEC_PATH.stat().st_mtime) / 86400
+        # §7.5 drift = eligible-but-missing BY PATH (set difference), mirroring
+        # vault_vec.status() — NOT a count delta. abs(on_disk - len(meta)) nets to
+        # zero when an add and a stale/deleted row cancel out, masking the rename/
+        # move drift the gate must catch. Legacy rows w/o abs_path fall back to
+        # rel_path → won't match a disk abs path → counted missing (fail-safe:
+        # over-reports, triggering a harmless rebuild, never under-reports).
+        disk_paths = {str(abs_path) for _, abs_path, _ in vv.find_markdown_files()}
+        indexed_paths = {m.get('abs_path') or m.get('rel_path') for m in meta}
+        out['on_disk'] = len(disk_paths)
+        out['drift'] = len(disk_paths - indexed_paths)
+        level, msg = vv.check_model_compat()
+        out['model_level'] = level          # ok / no_sidecar / soft / hard
+        out['model_msg'] = msg
+        about = vv.read_about()
+        out['model'] = about.get('embedding_model') if about else None
+    except Exception as e:
+        out['ok'] = False
+        out['error'] = str(e)
+    return out
+
+
+_TZ_OFFSET_RE = re.compile(r'([+-]\d{2})(\d{2})$')
+
+
+def _parse_ts(s):
+    """Robust ISO parse — tolerate ±HHMM offsets (orp_reader emits +0900, no colon).
+
+    datetime.fromisoformat only accepts ±HH:MM before Python 3.11. Normalize first.
+    """
+    if not s:
+        return None
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        fixed = _TZ_OFFSET_RE.sub(r'\1:\2', s)
+        try:
+            return datetime.fromisoformat(fixed)
+        except ValueError:
+            return None
+
+
+def _alias_health():
+    """Alias/keyword layer health by parsing `orp_reader.py status` text."""
+    out = {'layer': 'alias', 'ok': False}
+    if not ORP_READER.exists():
+        out['error'] = 'orp_reader.py missing'
+        return out
+    try:
+        r = subprocess.run(['python3', str(ORP_READER), 'status'],
+                           capture_output=True, text=True, timeout=10)
+    except Exception as e:
+        out['error'] = str(e)
+        return out
+    txt = (r.stdout or '').strip()
+    out['ok'] = r.returncode == 0
+    out['raw'] = txt
+    m = re.search(r'(\d+)\s+entries', txt)
+    if m:
+        out['entries'] = int(m.group(1))
+    m = re.search(r'updated\s+([0-9T:+\-]+)', txt)
+    if m:
+        out['updated'] = m.group(1)
+        ts = _parse_ts(out['updated'])
+        if ts is not None:
+            out['age_hours'] = (datetime.now(timezone.utc) - ts).total_seconds() / 3600
+    out['fresh'] = 'fresh' in txt and 'stale' not in txt
+    return out
+
+
+def _gap_health(days=7):
+    """Gap-log telemetry health: recent volume + all_miss rate."""
+    out = {'layer': 'gap', 'ok': True, 'window_days': days, 'records': 0,
+           'recent': 0, 'all_miss': 0, 'all_miss_rate': 0.0,
+           'overbroad': 0, 'overbroad_rate': 0.0}
+    if not LOG_PATH.exists():
+        return out
+    try:
+        lines = LOG_PATH.read_text(encoding='utf-8').splitlines()
+    except Exception as e:
+        out['ok'] = False
+        out['error'] = str(e)
+        return out
+    out['records'] = len(lines)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    recent = []
+    for ln in lines:
+        try:
+            rr = json.loads(ln)
+            if datetime.fromisoformat(rr['ts']) >= cutoff:
+                recent.append(rr)
+        except Exception:
+            continue
+    out['recent'] = len(recent)
+    out['all_miss'] = sum(1 for r in recent
+                          if r.get('alias_count', 0) == 0 and r.get('vec_count', 0) == 0)
+    out['all_miss_rate'] = (out['all_miss'] / len(recent)) if recent else 0.0
+    out['overbroad'] = sum(1 for r in recent if r.get('alias_overbroad'))
+    out['overbroad_rate'] = (out['overbroad'] / len(recent)) if recent else 0.0
+    if lines:
+        try:
+            out['last_ts'] = json.loads(lines[-1]).get('ts')
+        except Exception:
+            pass
+    return out
+
+
+def cmd_doctor(fmt='text', window=7):
+    vec = _vec_health()
+    alias = _alias_health()
+    gap = _gap_health(window)
+
+    warnings = []   # (layer, message, fix)
+    criticals = []  # (layer, message, fix)
+
+    # --- vec layer verdict ---
+    if not vec.get('ok'):
+        criticals.append(('vec', vec.get('error', 'unknown error'), 'python3 vault_vec.py index'))
+    else:
+        if vec.get('model_level') == 'hard':
+            criticals.append(('vec', f"model mismatch: {vec.get('model_msg')}", 'python3 vault_vec.py index'))
+        elif vec.get('model_level') == 'soft':
+            warnings.append(('vec', f"soft model mismatch: {vec.get('model_msg')}", 'rebuild when convenient'))
+        if vec.get('age_days', 0) > VEC_AGE_WARN_DAYS:
+            warnings.append(('vec', f"index stale {vec['age_days']:.1f}d (>{VEC_AGE_WARN_DAYS:.0f}d)",
+                             'python3 vault_vec.py update'))
+        if vec.get('drift', 0) > VEC_DRIFT_WARN:
+            warnings.append(('vec', f"drift {vec['drift']} files (>{VEC_DRIFT_WARN})",
+                             'python3 vault_vec.py update'))
+
+    # --- alias layer verdict ---
+    if not alias.get('ok'):
+        criticals.append(('alias', alias.get('error', 'status failed'), 'check orp_reader.py'))
+    elif alias.get('age_hours') is not None and alias['age_hours'] > ALIAS_AGE_WARN_HOURS:
+        warnings.append(('alias', f"index {alias['age_hours']:.0f}h old (>{ALIAS_AGE_WARN_HOURS:.0f}h — daily rebuild may have failed)",
+                         'check vault-index-rebuild cron'))
+
+    # --- gap telemetry verdict ---
+    if not gap.get('ok'):
+        warnings.append(('gap', gap.get('error', 'log read failed'), 'check orp-misses.jsonl'))
+    elif gap.get('recent', 0) > 0 and gap.get('all_miss_rate', 0) > GAP_ALLMISS_WARN:
+        warnings.append(('gap', f"all_miss {gap['all_miss_rate']*100:.0f}% over {window}d (>{GAP_ALLMISS_WARN*100:.0f}%) — retrieval degrading",
+                         'review gaps: vault_lookup.py review'))
+    if gap.get('ok') and gap.get('recent', 0) > 0 and gap.get('overbroad_rate', 0) > GAP_OVERBROAD_WARN:
+        warnings.append(('gap', f"over-broad {gap['overbroad_rate']*100:.0f}% over {window}d (>{GAP_OVERBROAD_WARN*100:.0f}%) — alias precision degrading (single-token fan-out)",
+                         'review: vault_lookup.py review'))
+
+    overall = 'critical' if criticals else ('warn' if warnings else 'healthy')
+
+    if fmt == 'json':
+        print(json.dumps({
+            'overall': overall,
+            'layers': {'vec': vec, 'alias': alias, 'gap': gap},
+            'warnings': [{'layer': l, 'msg': m, 'fix': f} for l, m, f in warnings],
+            'criticals': [{'layer': l, 'msg': m, 'fix': f} for l, m, f in criticals],
+        }, indent=2, ensure_ascii=False))
+        return 2 if criticals else (1 if warnings else 0)
+
+    icon = {'healthy': '✅', 'warn': '⚠', 'critical': '✗'}[overall]
+    n_issues = len(warnings) + len(criticals)
+    head = 'all systems healthy' if overall == 'healthy' else f'{n_issues} issue(s)'
+    print(f'=== ORP doctor — {icon} {head} ===\n')
+
+    def _layer_icon(layer):
+        if any(l == layer for l, _, _ in criticals):
+            return '✗'
+        if any(l == layer for l, _, _ in warnings):
+            return '⚠'
+        return '✅'
+
+    # alias
+    if alias.get('ok'):
+        fr = 'fresh' if alias.get('fresh') else 'stale'
+        age = f"{alias['age_hours']:.0f}h ago" if alias.get('age_hours') is not None else '?'
+        print(f"  {_layer_icon('alias')} [alias] vault-index.json  "
+              f"{alias.get('entries', '?')} entries · updated {age} · {fr}")
+    else:
+        print(f"  ✗ [alias] {alias.get('error')}")
+
+    # vec
+    if vec.get('ok'):
+        ml = {'ok': 'OK', 'no_sidecar': 'NO-SIDECAR', 'soft': 'SOFT', 'hard': 'HARD'}.get(vec.get('model_level'), '?')
+        print(f"  {_layer_icon('vec')} [vec]   vault-vec          "
+              f"{vec.get('entries', '?')} entries · age {vec.get('age_days', 0):.1f}d · "
+              f"drift {vec.get('drift', '?')} · model {ml}")
+    else:
+        print(f"  ✗ [vec]   {vec.get('error')}")
+
+    # gap
+    print(f"  {_layer_icon('gap')} [gap]   orp-misses.jsonl   "
+          f"{gap.get('records', 0)} records · {window}d: {gap.get('recent', 0)} lookups, "
+          f"{gap.get('all_miss', 0)} all_miss ({gap.get('all_miss_rate', 0)*100:.0f}%), "
+          f"{gap.get('overbroad', 0)} over-broad ({gap.get('overbroad_rate', 0)*100:.0f}%)")
+
+    if warnings or criticals:
+        print('\n  actions:')
+        for l, m, f in criticals:
+            print(f"    ✗ [{l}] {m}\n        → {f}")
+        for l, m, f in warnings:
+            print(f"    ⚠ [{l}] {m}\n        → {f}")
+    else:
+        print('\n  (no action needed)')
+
+    # low-volume caveat — thresholds can't trip meaningfully at low query rates
+    if gap.get('recent', 0) < 5:
+        print(f"\n  note: only {gap.get('recent', 0)} lookups in {window}d — gap-rate signals are low-confidence at this volume")
+
+    return 2 if criticals else (1 if warnings else 0)
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest='cmd', required=True)
@@ -562,6 +820,10 @@ def main():
 
     sub.add_parser('status', help='Check installation + log health')
 
+    dp = sub.add_parser('doctor', help='Unified health rollup across alias + vec + gap layers')
+    dp.add_argument('--format', choices=['text', 'json'], default='text')
+    dp.add_argument('--window', type=int, default=7, help='Gap-log window in days (default 7)')
+
     args = ap.parse_args()
     if args.cmd == 'search':
         sys.exit(cmd_search(args.query, args.top_k, args.threshold, args.no_log,
@@ -572,6 +834,8 @@ def main():
         sys.exit(cmd_review(args.since, args.top))
     if args.cmd == 'status':
         sys.exit(cmd_status())
+    if args.cmd == 'doctor':
+        sys.exit(cmd_doctor(args.format, args.window))
 
 
 if __name__ == '__main__':
