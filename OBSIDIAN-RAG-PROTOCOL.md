@@ -575,6 +575,9 @@ To adopt ORP for your agent:
 - [ ] Verify: agent reads vault-index.json on recall-intent queries
 - [ ] Verify: incremental rebuild shows 0 changes when vault is unchanged
 - [ ] Verify: `orp_health.py` exits 0 against the freshly-built index
+- [ ] Verify new agent identity end to end: `digest --agent <id> --bootstrap --peek` prints `agent=<id>`
+- [ ] Verify log identity end to end: `orp_reader.py log --agent <id> ...` creates a fresh `🦅[<id>]` line in `wiki/log.md`
+- [ ] If hooks were copied from another agent, grep hook config for stale `--agent <old-id>` values before trusting the cursor
 - [ ] If using the optional semantic layer: set up its refresh trigger too (§7.5), and verify staleness is machine-checkable — artificially stale the semantic index and confirm your freshness check exits non-zero (mirroring the `orp_health.py exits 0` line above for the alias layer). An unmaintained secondary index degrades retrieval invisibly, so "monitored" only counts if a check can actually fail.
 
 ---

@@ -242,19 +242,20 @@ Add these rules to your system prompt (SOUL.md or equivalent):
 ## Obsidian RAG Protocol
 
 For any user question whose answer depends on personal context — what
-we decided, what we discussed, what we know about X — your first tool
-call MUST be:
+we decided, what we discussed, what we know about X — your first lookup
+MUST go through the ORP reader:
 
-  read_file(~/.hermes/vault-index.json)
+  python3 /path/to/orp_reader.py match "<user question>"
 
 Then:
-1. Extract keywords from the user's question.
-2. Match against `aliases` arrays in the index (substring, case-insensitive).
-3. HIT → read_file the matched vault file(s) and use as context.
-4. MISS → check `updated`. If ≥4 days old, offer to rebuild the index.
-5. JSON parse error → ask the user to rebuild.
+1. HIT → read the matched vault file path(s) and use them as context.
+2. MISS → run `python3 /path/to/orp_reader.py status`. If the index is
+   stale, offer to rebuild it; otherwise ask the user for the missing
+   context.
+3. Reader error → surface the error and ask the user whether to rebuild
+   or inspect the ORP setup.
 
-Skip the index for direct-action commands (run X, query a price, send a
+Skip ORP for direct-action commands (run X, query a price, send a
 message) and self-contained transformations (format this, edit that)
 that don't depend on personal context.
 ```
@@ -268,20 +269,24 @@ Add to your `CLAUDE.md`:
 ```
 ## Vault Context
 
-Before answering any question that depends on personal context, read
-~/.hermes/vault-index.json and match the user's keywords against the
-aliases field (substring, case-insensitive). If a match is found, read
-the referenced .md file and use it as context.
+Before answering any question that depends on personal context, call:
 
-Skip the index for direct-action commands and self-contained tasks.
+  python3 /path/to/orp_reader.py match "<user question>"
+
+If it returns matched vault file path(s), read those files and use them
+as context. If it misses, check `python3 /path/to/orp_reader.py status`
+before asking the user for missing context.
+
+Skip ORP for direct-action commands and self-contained tasks.
 ```
 
 ### Any Other Agent
 
 The protocol is agent-agnostic. All you need:
-1. **A way to read files** — `read_file`, `cat`, MCP filesystem server, or equivalent.
-2. **A system prompt rule** — "for recall-intent queries, read `vault-index.json` first" (see §4.1 for what counts as recall intent).
-3. **A rebuild trigger** — pick one or more from [Triggering Rebuilds](#triggering-rebuilds) above.
+1. **A way to run or wrap `orp_reader.py match`** — shell command, local tool call, MCP wrapper, or direct Python import.
+2. **A way to read matched files** — `read_file`, `cat`, MCP filesystem server, or equivalent.
+3. **A system prompt rule** — "for recall-intent queries, call the ORP reader first" (see §4.1 for what counts as recall intent).
+4. **A rebuild trigger** — pick one or more from [Triggering Rebuilds](#triggering-rebuilds) above.
 
 #### Reader reference
 
@@ -386,6 +391,29 @@ python3 ~/.hermes/scripts/orp_reader.py digest --agent hermes
 3. Wire its session-start hook to call `digest --agent codex`.
 
 No structural vault changes needed. Cursor files at `<vault>/.orp/cursor-<id>.json` are per-agent and don't collide.
+
+### New-agent self-check
+
+Run this before trusting a copied hook setup. Replace `codex` with the
+new agent id and set `ORP_READER_PATH` / `ORP_VAULT_PATH` if your paths
+are not the defaults.
+
+```bash
+AGENT_ID=codex
+python3 "${ORP_READER_PATH:-$HOME/.hermes/scripts/orp_reader.py}" digest --agent "$AGENT_ID" --bootstrap --peek
+python3 "${ORP_READER_PATH:-$HOME/.hermes/scripts/orp_reader.py}" log --agent "$AGENT_ID" --action note "onboarding self-check for $AGENT_ID"
+tail -3 "${ORP_VAULT_PATH:-$HOME/Documents/Obsidian Vault}/wiki/log.md"
+```
+
+Pass conditions:
+- the digest header says `agent=<id>`
+- the tail output contains a fresh line starting with `🦅[<id>]`
+- no copied hook command still contains another agent id, such as `--agent cc`
+
+If the wrong id appears, fix every hook command first, then reset or
+re-bootstrap any cursor that was accidentally advanced under the wrong
+agent id. This is the real N=3 footgun: silent cursor clobbering, not
+the absence of leader election or quorum.
 
 ---
 

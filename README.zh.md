@@ -292,7 +292,7 @@ ORP 适合的场景：(a) 有 ≥2 个 agent 往同一个 vault 写东西，(b) 
 
 ## 状态
 
-协议 v1.7。仓库里 **8 个单文件 Python 工具**（约 3.6k 行 · stdlib + v1.6 vec 层用的可选 `openai` + `tiktoken`）+ 2 个参考 hook 脚本。
+协议目前在 v1.8.x。仓库里 **8 个单文件 Python 工具**（约 3.6k 行 · stdlib + v1.6 vec 层用的可选 `openai` + `tiktoken`）+ 2 个参考 hook 脚本。
 
 正在跑的：
 - 一个约 800 篇笔记的 vault，单笔记本上跑了 6 个月
@@ -327,7 +327,7 @@ ORP 适合的场景：(a) 有 ≥2 个 agent 往同一个 vault 写东西，(b) 
 - [`convert_bare_to_fullpath.py`](convert_bare_to_fullpath.py) ——批量把 bare wikilink 转成全路径（spec §3.5）
 - [`examples/orp-vault-stage.py`](examples/orp-vault-stage.py) + [`orp-vault-flush.py`](examples/orp-vault-flush.py) ——v1.5 PostToolUse + Stop hook 参考实现（spec §5.6）
 - [`INSTALL.md`](INSTALL.md) ——安装、4 种触发方式、各 agent 接入、session-start digest 接线、auto-log hook 接线
-- [`OBSIDIAN-RAG-PROTOCOL.md`](OBSIDIAN-RAG-PROTOCOL.md) ——完整协议 spec（v1.7）
+- [`OBSIDIAN-RAG-PROTOCOL.md`](OBSIDIAN-RAG-PROTOCOL.md) ——完整协议 spec（v1.8.x）
 - [`examples/`](examples/) ——3 篇真实笔记 + v1.5 hook 脚本
 
 ## License
