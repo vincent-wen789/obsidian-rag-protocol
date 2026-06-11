@@ -292,7 +292,7 @@ If you've used ORP before and want to see what changed (jargon explained inline)
 
 ## Status
 
-Spec is at v1.7. The repo ships **8 single-file Python utilities** (~3.6k lines total: stdlib + optional `openai` + `tiktoken` for the v1.6 vec layer) plus 2 example hook scripts.
+Spec is at v1.8.x. The repo ships **8 single-file Python utilities** (~3.6k lines total: stdlib + optional `openai` + `tiktoken` for the v1.6 vec layer) plus 2 example hook scripts.
 
 What's running:
 - An ~800-entry vault on a single laptop, six months and counting
@@ -327,7 +327,7 @@ Intentionally not done:
 - [`convert_bare_to_fullpath.py`](convert_bare_to_fullpath.py) — bulk migrate bare wikilinks to full paths (spec §3.5)
 - [`examples/orp-vault-stage.py`](examples/orp-vault-stage.py) + [`orp-vault-flush.py`](examples/orp-vault-flush.py) — v1.5 PostToolUse + Stop hook reference impl (spec §5.6)
 - [`INSTALL.md`](INSTALL.md) — installation, four trigger paths, agent integration, session-start digest wiring, auto-log hook wiring
-- [`OBSIDIAN-RAG-PROTOCOL.md`](OBSIDIAN-RAG-PROTOCOL.md) — full protocol spec (v1.7)
+- [`OBSIDIAN-RAG-PROTOCOL.md`](OBSIDIAN-RAG-PROTOCOL.md) — full protocol spec (v1.8.x)
 - [`examples/`](examples/) — three real notes you can run the full loop against in 30 seconds, plus the v1.5 hook scripts
 
 ## License

@@ -131,7 +131,7 @@ When you read `vault-index.json`, expect this structure:
       "path": "<absolute-path-to-md-file>",
       "title": "<human-readable-title>",
       "summary": {
-        "status": "<active|draft|archived|unknown>",
+        "status": "<captured|candidate|verified|retrievable|stale|archived>",
         "key_points": ["<string>", ...],
         "last_action": "<optional-string>"
       },
