@@ -571,6 +571,7 @@ VEC_DRIFT_WARN = 25          # |on-disk − indexed| files before flagging drift
 ALIAS_AGE_WARN_HOURS = 36.0   # alias index rebuilds daily; >36h = a rebuild was missed
 GAP_ALLMISS_WARN = 0.05       # 7d all_miss rate above this → retrieval degrading
 GAP_OVERBROAD_WARN = 0.20     # 7d over-broad (alias_count≥OVERBROAD_MIN) rate above this → alias precision degrading
+GAP_MIN_VOLUME = 20           # gap-rate warnings need ≥ this many lookups; below it a single miss already blows past 5% (1/8=12%) — pure small-sample noise, not degradation
 
 
 def _vec_health():
@@ -725,10 +726,10 @@ def cmd_doctor(fmt='text', window=7):
     # --- gap telemetry verdict ---
     if not gap.get('ok'):
         warnings.append(('gap', gap.get('error', 'log read failed'), 'check orp-misses.jsonl'))
-    elif gap.get('recent', 0) > 0 and gap.get('all_miss_rate', 0) > GAP_ALLMISS_WARN:
+    elif gap.get('recent', 0) >= GAP_MIN_VOLUME and gap.get('all_miss_rate', 0) > GAP_ALLMISS_WARN:
         warnings.append(('gap', f"all_miss {gap['all_miss_rate']*100:.0f}% over {window}d (>{GAP_ALLMISS_WARN*100:.0f}%) — retrieval degrading",
                          'review gaps: vault_lookup.py review'))
-    if gap.get('ok') and gap.get('recent', 0) > 0 and gap.get('overbroad_rate', 0) > GAP_OVERBROAD_WARN:
+    if gap.get('ok') and gap.get('recent', 0) >= GAP_MIN_VOLUME and gap.get('overbroad_rate', 0) > GAP_OVERBROAD_WARN:
         warnings.append(('gap', f"over-broad {gap['overbroad_rate']*100:.0f}% over {window}d (>{GAP_OVERBROAD_WARN*100:.0f}%) — alias precision degrading (single-token fan-out)",
                          'review: vault_lookup.py review'))
 
@@ -788,9 +789,10 @@ def cmd_doctor(fmt='text', window=7):
     else:
         print('\n  (no action needed)')
 
-    # low-volume caveat — thresholds can't trip meaningfully at low query rates
-    if gap.get('recent', 0) < 5:
-        print(f"\n  note: only {gap.get('recent', 0)} lookups in {window}d — gap-rate signals are low-confidence at this volume")
+    # low-volume caveat — gap-rate thresholds can't trip meaningfully below
+    # GAP_MIN_VOLUME, so they're suppressed there (see the >= gate above).
+    if gap.get('recent', 0) < GAP_MIN_VOLUME:
+        print(f"\n  note: only {gap.get('recent', 0)} lookups in {window}d (<{GAP_MIN_VOLUME}) — gap-rate warnings suppressed (low-confidence at this volume)")
 
     return 2 if criticals else (1 if warnings else 0)
 
