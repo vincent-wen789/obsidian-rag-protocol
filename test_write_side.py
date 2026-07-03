@@ -119,19 +119,34 @@ def test_scan_entities_finds_md():
 # ── Task 7: promotion + cohort fold ───────────────────────────
 
 def test_promotion_from_gap_log():
+    # real gap log stores ABSOLUTE paths — normalization must map them to path_rel
+    V = "/Users/vincentwen/Documents/Vincent Obsidian"
     gap_lines = [
         {"ts": "2026-07-01T10:00:00+00:00", "query": "kol pricing",
-         "fused_top3": [{"path": "wiki/entities/kol.md"}]},
+         "fused_top3": [{"path": f"{V}/wiki/entities/kol.md"}]},
         {"ts": "2026-07-02T11:00:00+00:00", "query": "kol rate card",
-         "fused_top3": [{"path": "wiki/entities/kol.md"}]},
+         "fused_top3": [{"path": f"{V}/wiki/entities/kol.md"}]},
         {"ts": "2026-07-02T12:00:00+00:00", "query": "unrelated",
-         "fused_top3": [{"path": "wiki/entities/other.md"}]},
+         "fused_top3": [{"path": f"{V}/wiki/entities/other.md"}]},
     ]
     entities = [{"path_rel": "wiki/entities/kol.md", "status": "captured"},
                 {"path_rel": "wiki/entities/other.md", "status": "verified"}]
-    noms = orp._promotion_nominations(gap_lines, entities, promote_min=2)
-    assert "wiki/entities/kol.md" in noms          # captured + 2 distinct dates
-    assert "wiki/entities/other.md" not in noms    # only 1 date AND already verified
+    import pathlib
+    noms = orp._promotion_nominations(gap_lines, entities, promote_min=2, vault=pathlib.Path(V))
+    assert "wiki/entities/kol.md" in noms          # abs→rel normalized, captured + 2 dates
+    assert "wiki/entities/other.md" not in noms    # 1 date AND already verified
+    # without vault (relative paths already) still works
+    rel_lines = [{"ts": "2026-07-01", "fused_top3": [{"path": "wiki/entities/kol.md"}]},
+                 {"ts": "2026-07-02", "fused_top3": [{"path": "wiki/entities/kol.md"}]}]
+    assert "wiki/entities/kol.md" in orp._promotion_nominations(rel_lines, entities, 2)
+
+
+def test_validate_rejects_newlines():
+    ok, _ = cap.validate_candidate({"title": "line1\nline2", "aliases": [], "body": "b", "why_shareable": "w"})
+    assert not ok  # newline in title splits frontmatter/H1
+    ok2, _ = cap.validate_candidate({"title": "T", "aliases": ["a\nb"], "body": "b", "why_shareable": "w"})
+    assert not ok2  # newline in alias
+    assert "\n" not in cap._yaml_escape("a\nb")  # escape strips as defense
 
 
 def test_cohort_fold():

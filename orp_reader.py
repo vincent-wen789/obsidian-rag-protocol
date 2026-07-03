@@ -32,6 +32,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1029,7 +1030,21 @@ def cmd_set_status(args) -> int:
         new_fm = _ENTITY_STATUS_RE.sub(f"status: {args.status}", fm, count=1)
     else:
         new_fm = fm.rstrip("\n") + f"\nstatus: {args.status}\n"
-    path.write_text(new_fm + rest, encoding="utf-8")
+    # atomic: write a sibling temp then os.replace (never leave the curated note
+    # truncated if interrupted mid-write — codex review P1)
+    fd_tmp, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".set-status-", suffix=".tmp")
+    try:
+        with os.fdopen(fd_tmp, "w", encoding="utf-8") as f:
+            f.write(new_fm + rest)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
     try:
         rel = path.relative_to(vault)
     except ValueError:
@@ -1172,10 +1187,19 @@ def _read_gap_log(gap_log_path):
     return out
 
 
-def _promotion_nominations(gap_lines, entities, promote_min=2):
+def _promotion_nominations(gap_lines, entities, promote_min=2, vault=None):
     """Nominate captured/candidate entities exposed in fused_top3 on >= promote_min
-    DISTINCT dates. Exposure != usage — this only nominates; the human promotes."""
+    DISTINCT dates. Exposure != usage — this only nominates; the human promotes.
+
+    gap-log fused_top3[].path is ABSOLUTE (from vault_lookup); entities are keyed
+    vault-relative — normalize to relative before lookup or every nomination misses
+    (codex review P1)."""
     status_by_rel = {e["path_rel"]: e["status"] for e in entities}
+    prefix = (str(vault) + os.sep) if vault else None
+
+    def _rel(p):
+        return p[len(prefix):] if (prefix and p.startswith(prefix)) else p
+
     dates_by_path = {}
     for rec in gap_lines:
         ts = (rec.get("ts") or "")[:10]  # YYYY-MM-DD
@@ -1184,7 +1208,7 @@ def _promotion_nominations(gap_lines, entities, promote_min=2):
         for hit in rec.get("fused_top3") or []:
             path = hit.get("path")
             if path:
-                dates_by_path.setdefault(path, set()).add(ts)
+                dates_by_path.setdefault(_rel(path), set()).add(ts)
     noms = {}
     for path, dates in dates_by_path.items():
         st = status_by_rel.get(path)
@@ -1261,7 +1285,7 @@ def cmd_consolidation_inbox(args) -> int:
     dups = [(k, v) for k, v in by_key.items() if len(v) >= 2]
 
     gap_lines = _read_gap_log(args.gap_log)
-    noms = _promotion_nominations(gap_lines, entities, args.promote_min)
+    noms = _promotion_nominations(gap_lines, entities, args.promote_min, vault=vault)
     gap_caps = _gap_capture_clusters(gap_lines)
     folded, loose_stale = _fold_cohorts(stale, args.cohort_fold_min)
 
@@ -1393,11 +1417,21 @@ def cmd_inbox_check(args) -> int:
         return 0
     try:
         if _inbox_is_stale(vault, args.max_age_days):
-            subprocess.Popen(
-                ["python3", os.path.abspath(__file__), "consolidation-inbox",
-                 "--vault", str(vault)],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
-            )
+            # single-flight guard: staleness only clears once the child WRITES the
+            # report, so rapid session starts would each spawn a duplicate scan
+            # racing on the same dated file. A self-expiring lock (mtime < 10min)
+            # lets exactly one regen run; a genuinely-needed later regen still fires
+            # (codex review P2).
+            lock = vault / ".orp" / "reports" / ".inbox-regen.lock"
+            fresh_lock = lock.is_file() and (datetime.now().timestamp() - lock.stat().st_mtime) < 600
+            if not fresh_lock:
+                lock.parent.mkdir(parents=True, exist_ok=True)
+                lock.write_text(str(datetime.now().timestamp()))
+                subprocess.Popen(
+                    ["python3", os.path.abspath(__file__), "consolidation-inbox",
+                     "--vault", str(vault)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+                )
         pending = _inbox_pending_count(vault)
         if pending:
             print(f"📥 consolidation-inbox: {pending} 项待审 "
