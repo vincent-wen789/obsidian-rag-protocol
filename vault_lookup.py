@@ -83,6 +83,8 @@ def fuse_results(alias_hits, vec_hits, top_k):
             e['rrf_score'] += 1.0 / (RRF_K + rank)
             if h.get('label'):
                 e['alias_label'] = h['label']
+            if h.get('status'):  # v2.0-alpha: carry status for alias-only hits
+                e['alias_status'] = h['status']
 
     for rank, h in enumerate(vec_hits, start=1):
         p = h.get('path', '')
@@ -250,8 +252,8 @@ def cmd_search(query, top_k, threshold, no_log, fmt, include_status=None):
             print(f'# query: {query}  recommendation: {rec}  fused_top={len(fused)}')
             for e in fused:
                 tag = '+'.join(e['sources'])
-                # v1.5.1 C3: include status tag when known (from vec layer)
-                status = e.get('vec_status')
+                # v1.5.1 C3 + v2.0-alpha: status tag from vec layer, fall back to alias
+                status = e.get('vec_status') or e.get('alias_status')
                 src_marker = f"[{tag}/{status}]" if status else f"[{tag}]"
                 detail_parts = []
                 if 'alias_rank' in e:
