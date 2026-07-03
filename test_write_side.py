@@ -183,6 +183,176 @@ def test_inbox_freshness():
     assert orp._inbox_is_stale(d, max_age_days=7) is True     # backdated → stale
 
 
+# ── capture write-side: stub round-trip (cross-module contract) ──
+
+def test_write_stub_roundtrip_parses_back():
+    """The stub capture writes MUST be readable by orp_reader's entity parser with
+    status=captured — this is the write→read contract the whole loop depends on."""
+    import tempfile, pathlib
+    d = pathlib.Path(tempfile.mkdtemp())
+    ents = d / "wiki" / "entities"; ents.mkdir(parents=True)
+    orig = cap.ENTITIES_DIR
+    try:
+        cap.ENTITIES_DIR = ents
+        # realistic title (colon + ampersand + CJK) must round-trip cleanly through
+        # quote+strip; body newlines are fine (only frontmatter values can't have them)
+        obj = {"title": "MEXC Japan: KOL 报价 & 合规", "aliases": ["kol pricing", "日本 报价"],
+               "body": "line1\nline2", "why_shareable": "w"}
+        path = cap._write_stub(obj, "abcd1234", "2026-07-03")
+        assert path is not None and path.is_file()
+        parsed = orp._parse_entity_for_report(path)
+        assert parsed["status"] == "captured", parsed
+        assert parsed["title"] == "MEXC Japan: KOL 报价 & 合规", parsed["title"]
+        assert path.read_text().count("---") == 2  # fence intact
+        # embedded double-quotes: the naive parser keeps the escaping (cosmetic), but the
+        # LOAD-BEARING contract holds — fence intact + status still parses captured
+        obj2 = {"title": 'has "quotes"', "aliases": [], "body": "b", "why_shareable": "w"}
+        p2 = cap._write_stub(obj2, "sid2", "2026-07-03")
+        parsed2 = orp._parse_entity_for_report(p2)
+        assert parsed2["status"] == "captured"
+        assert p2.read_text().count("---") == 2  # escaped quotes don't break the fence
+    finally:
+        cap.ENTITIES_DIR = orig
+
+
+def test_write_stub_no_clobber():
+    import tempfile, pathlib
+    d = pathlib.Path(tempfile.mkdtemp())
+    ents = d / "wiki" / "entities"; ents.mkdir(parents=True)
+    orig = cap.ENTITIES_DIR
+    try:
+        cap.ENTITIES_DIR = ents
+        (ents / "foo.md").write_text("PRE-EXISTING\n")
+        obj = {"title": "Foo", "aliases": [], "body": "b", "why_shareable": "w"}
+        assert cap._write_stub(obj, "s", "2026-07-03") is None      # refused to clobber
+        assert (ents / "foo.md").read_text() == "PRE-EXISTING\n"    # original untouched
+    finally:
+        cap.ENTITIES_DIR = orig
+
+
+# ── set-status edge branches ─────────────────────────────────
+
+def _mk_vault_with_entity(frontmatter_body):
+    import tempfile, pathlib
+    d = pathlib.Path(tempfile.mkdtemp())
+    (d / "wiki" / "entities").mkdir(parents=True)
+    (d / "wiki" / "log.md").write_text("# log\n")
+    ent = d / "wiki" / "entities" / "e.md"
+    ent.write_text(frontmatter_body)
+    return d, ent
+
+
+def test_set_status_inserts_when_absent():
+    import types
+    d, ent = _mk_vault_with_entity("---\ntitle: E\n---\n# E\n")  # no status: line
+    args = types.SimpleNamespace(path=str(ent), status="verified", agent="cc",
+                                 vault=str(d), reason=None)
+    assert orp.cmd_set_status(args) == 0
+    txt = ent.read_text()
+    assert "status: verified" in txt.split("---")[1]  # inserted into frontmatter block
+    assert txt.count("---") == 2                       # fence not corrupted
+
+
+def test_set_status_error_paths():
+    import types, tempfile, pathlib
+    d, ent = _mk_vault_with_entity("no frontmatter here\n")
+    a1 = types.SimpleNamespace(path=str(ent), status="verified", agent="cc", vault=str(d), reason=None)
+    assert orp.cmd_set_status(a1) == 2                  # no frontmatter → reject
+    a2 = types.SimpleNamespace(path=str(d / "wiki" / "entities" / "ghost.md"),
+                               status="verified", agent="cc", vault=str(d), reason=None)
+    assert orp.cmd_set_status(a2) == 2                  # entity not found → reject
+
+
+# ── _append_log_entry (mirrors cmd_log §5.2) ─────────────────
+
+def test_append_log_entry():
+    import tempfile, pathlib
+    d = pathlib.Path(tempfile.mkdtemp())
+    (d / "wiki").mkdir(); (d / "wiki" / "log.md").write_text("# log\n")
+    pre = (d / "wiki" / "log.md").stat().st_size
+    rc, n = orp._append_log_entry(d, "cc", "note", "hello", trigger="manual:test")
+    assert rc == 0 and n > 0
+    post = (d / "wiki" / "log.md").stat().st_size
+    assert post == pre + n                              # byte-size invariant holds
+    assert "trigger=manual:test" in (d / "wiki" / "log.md").read_text()
+    # missing log → rc 2
+    rc2, n2 = orp._append_log_entry(pathlib.Path(tempfile.mkdtemp()), "cc", "note", "x")
+    assert rc2 == 2 and n2 == 0
+
+
+# ── inbox-check single-flight (codex P2 race fix) ────────────
+
+def test_inbox_check_single_flight():
+    import types, tempfile, pathlib
+    d = pathlib.Path(tempfile.mkdtemp())
+    (d / ".orp" / "reports").mkdir(parents=True)  # empty → always stale
+    calls = {"n": 0}
+
+    class _FakePopen:
+        def __init__(self, *a, **k):
+            calls["n"] += 1
+
+    orig = orp.subprocess.Popen
+    try:
+        orp.subprocess.Popen = _FakePopen
+        args = types.SimpleNamespace(vault=str(d), max_age_days=7)
+        assert orp.cmd_inbox_check(args) == 0
+        assert orp.cmd_inbox_check(args) == 0  # second call: fresh lock suppresses spawn
+        assert calls["n"] == 1, f"expected 1 spawn, got {calls['n']}"
+        assert (d / ".orp" / "reports" / ".inbox-regen.lock").is_file()
+    finally:
+        orp.subprocess.Popen = orig
+
+
+# ── consolidation-inbox full pipeline (integration) ──────────
+
+def test_consolidation_inbox_integration():
+    """End-to-end on a synthetic vault: promotion (abs path) + dup + cohort fold +
+    gap-capture all render in one report without a live vault or claude call."""
+    import tempfile, pathlib, types, time
+    d = pathlib.Path(tempfile.mkdtemp())
+    ents = d / "wiki" / "entities"; ents.mkdir(parents=True)
+    (d / "wiki" / "log.md").write_text("# log\n")
+
+    (ents / "kol.md").write_text("---\nstatus: captured\ntitle: KOL Pricing\n---\n# KOL Pricing\n")
+    (ents / "dup-a.md").write_text("---\nstatus: verified\ntitle: Shared Topic\n---\n# Shared Topic\n")
+    (ents / "dup-b.md").write_text("---\nstatus: captured\ntitle: Shared Topic\n---\n# Shared Topic\n")
+    # a stale cohort: 22 entities all dated 2026-01-01 → folded.
+    # staleness uses max(mtime, updated_date), so backdate BOTH or fresh mtime wins.
+    old = time.time() - 200 * 86400
+    for i in range(22):
+        f = ents / f"cohort-{i}.md"
+        f.write_text(f"---\nstatus: captured\ntitle: Cohort {i}\nupdated: 2026-01-01\n---\n# Cohort {i}\n")
+        os.utime(f, (old, old))
+
+    # gap log (abs paths, like the real one): kol exposed on 2 distinct dates + repeated all-miss
+    gap = d / "gaps.jsonl"
+    kol_abs = str((ents / "kol.md"))
+    import json as _j
+    gap.write_text("\n".join([
+        _j.dumps({"ts": "2026-06-01T10:00:00+00:00", "query": "kol", "fused_top3": [{"path": kol_abs}]}),
+        _j.dumps({"ts": "2026-06-05T10:00:00+00:00", "query": "kol rate", "fused_top3": [{"path": kol_abs}]}),
+        _j.dumps({"ts": "2026-06-06T10:00:00+00:00", "query": "how to zzz", "fused_top3": []}),
+        _j.dumps({"ts": "2026-06-07T10:00:00+00:00", "query": "how to zzz", "fused_top3": []}),
+    ]) + "\n")
+
+    out = d / "inbox.md"
+    args = types.SimpleNamespace(vault=str(d), scan=["wiki"], gap_log=str(gap),
+                                 stale_days=30, promote_min=2, cohort_fold_min=20,
+                                 limit=50, output=str(out), format="json")
+    assert orp.cmd_consolidation_inbox(args) == 0
+    report = out.read_text()
+    # promotion: kol nominated (captured, exposed 2 distinct dates, abs→rel normalized)
+    assert "wiki/entities/kol.md" in report and "Promotion nominations (1)" in report
+    assert "set-status wiki/entities/kol.md verified" in report
+    # dup group surfaced
+    assert "shared topic" in report.lower()
+    # cohort folded, not listed individually
+    assert "22 entities all dated `2026-01-01`" in report
+    # gap-capture
+    assert "how to zzz" in report
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:
