@@ -30,7 +30,9 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
+import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -936,6 +938,124 @@ def _parse_entity_for_report(path: Path):
     return out
 
 
+def _scan_entities(vault, scan_roots):
+    """Scan vault entity markdown under scan_roots. Shared by stale-dedup + inbox.
+    Skips log/README/index + any dotdir path. Returns list of parsed entity dicts."""
+    skip_names = {"log.md", "README.md", "index.md"}
+    entities = []
+    for root in scan_roots:
+        root_path = vault / root
+        if not root_path.is_dir():
+            continue
+        for md in root_path.rglob("*.md"):
+            if md.name in skip_names:
+                continue
+            if any(part.startswith('.') for part in md.relative_to(vault).parts):
+                continue
+            ent = _parse_entity_for_report(md)
+            if ent:
+                entities.append(ent)
+    return entities
+
+
+def _append_log_entry(vault, agent, action, msg, trigger=None):
+    """§5.2 append-only write to wiki/log.md with flock + byte-size invariant.
+    ponytail: byte-invariant flock logic mirrors cmd_log's inline block by copy —
+    the §5.2 contract is spec-frozen so two stable copies < the risk of refactoring
+    the live/telemetried cmd_log path. If §5.2 ever changes, update both.
+    Returns (rc, nbytes); rc 0 on success, 2/4 on error."""
+    log_path = vault / DEFAULT_LOG_REL
+    if not log_path.exists():
+        print(f"ERROR: log.md not found at {log_path}", file=sys.stderr)
+        return 2, 0
+    ts = datetime.now().astimezone().isoformat(timespec="seconds")
+    entry = f"\n🦅[{agent}] {ts} · {action} · {msg}"
+    if trigger is not None:
+        sid8 = hashlib.sha256(f"{trigger}-{ts}".encode()).hexdigest()[:8]
+        entry += f" ‖ meta: session={sid8} trigger={trigger}"
+    entry += "\n"
+    entry_bytes = entry.encode("utf-8")
+    pre_size = log_path.stat().st_size
+    fd = os.open(log_path, os.O_WRONLY | os.O_APPEND)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        os.write(fd, entry_bytes)
+        os.fsync(fd)
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
+    post_size = log_path.stat().st_size
+    if post_size < pre_size + len(entry_bytes):
+        print(f"ERROR: log.md byte-size invariant violated "
+              f"(pre={pre_size}, post={post_size})", file=sys.stderr)
+        return 4, len(entry_bytes)
+    return 0, len(entry_bytes)
+
+
+def cmd_set_status(args) -> int:
+    """v2.0-alpha — atomically set an entity's frontmatter status + auto-log a decision.
+    The human-gated promotion action. Does NOT merge/delete — only flips status."""
+    try:
+        _validate_agent_id(args.agent)
+    except ValueError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
+    if args.status not in ALL_STATUS:
+        print(f"ERROR: status must be one of {sorted(ALL_STATUS)}", file=sys.stderr)
+        return 2
+    try:
+        vault = _resolve_vault(args.vault)
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
+    path = Path(args.path).expanduser()
+    if not path.is_absolute():
+        path = vault / args.path
+    if not path.is_file():
+        print(f"ERROR: entity not found: {path}", file=sys.stderr)
+        return 2
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("---"):
+        print("ERROR: entity has no frontmatter block", file=sys.stderr)
+        return 2
+    end = text.find("\n---", 3)
+    if end < 0:
+        print("ERROR: unterminated frontmatter", file=sys.stderr)
+        return 2
+    fm, rest = text[:end], text[end:]
+    if _ENTITY_STATUS_RE.search(fm):
+        new_fm = _ENTITY_STATUS_RE.sub(f"status: {args.status}", fm, count=1)
+    else:
+        new_fm = fm.rstrip("\n") + f"\nstatus: {args.status}\n"
+    # atomic: write a sibling temp then os.replace (never leave the curated note
+    # truncated if interrupted mid-write — codex review P1)
+    fd_tmp, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".set-status-", suffix=".tmp")
+    try:
+        with os.fdopen(fd_tmp, "w", encoding="utf-8") as f:
+            f.write(new_fm + rest)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    try:
+        rel = path.relative_to(vault)
+    except ValueError:
+        rel = path
+    reason = f" ({args.reason})" if args.reason else ""
+    msg = f"set-status {rel} → {args.status}{reason}"
+    rc, _ = _append_log_entry(vault, args.agent, "decision", msg, trigger="manual:set-status")
+    print(f"{rel} → status: {args.status}")
+    return rc
+
+
 def cmd_stale_dedup_report(args) -> int:
     """v1.6 E Tier 2 — write a stale + duplicate candidate report.
 
@@ -955,22 +1075,7 @@ def cmd_stale_dedup_report(args) -> int:
         return 2
 
     scan_roots = args.scan or ["hermes-knowledge", "wiki"]
-    skip_names = {"log.md", "README.md", "index.md"}
-
-    entities = []
-    for root in scan_roots:
-        root_path = vault / root
-        if not root_path.is_dir():
-            continue
-        for md in root_path.rglob("*.md"):
-            if md.name in skip_names:
-                continue
-            # also skip hidden + report output dir to avoid recursion
-            if any(part.startswith('.') for part in md.relative_to(vault).parts):
-                continue
-            ent = _parse_entity_for_report(md)
-            if ent:
-                entities.append(ent)
+    entities = _scan_entities(vault, scan_roots)
 
     now = datetime.now().astimezone()
     stale_cutoff_ts = (now - timedelta(days=args.stale_days)).timestamp()
@@ -1057,6 +1162,282 @@ def cmd_stale_dedup_report(args) -> int:
         print(f"  entities scanned: {summary['entities_scanned']}")
         print(f"  stale candidates: {summary['stale_count']}")
         print(f"  duplicate groups: {summary['dup_groups']}")
+    return 0
+
+
+# ── v2.0-alpha consolidation inbox ───────────────────────────────
+
+DEFAULT_GAP_LOG = "~/.claude/data/orp-misses.jsonl"
+
+
+def _read_gap_log(gap_log_path):
+    """Read the retrieval outcome log (JSONL). Best-effort; [] if absent/unreadable."""
+    p = Path(gap_log_path).expanduser()
+    if not p.is_file():
+        return []
+    out = []
+    for line in p.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except Exception:
+            continue
+    return out
+
+
+def _promotion_nominations(gap_lines, entities, promote_min=2, vault=None):
+    """Nominate captured/candidate entities exposed in fused_top3 on >= promote_min
+    DISTINCT dates. Exposure != usage — this only nominates; the human promotes.
+
+    gap-log fused_top3[].path is ABSOLUTE (from vault_lookup); entities are keyed
+    vault-relative — normalize to relative before lookup or every nomination misses
+    (codex review P1)."""
+    status_by_rel = {e["path_rel"]: e["status"] for e in entities}
+    prefix = (str(vault) + os.sep) if vault else None
+
+    def _rel(p):
+        return p[len(prefix):] if (prefix and p.startswith(prefix)) else p
+
+    dates_by_path = {}
+    for rec in gap_lines:
+        ts = (rec.get("ts") or "")[:10]  # YYYY-MM-DD
+        if not ts:
+            continue
+        for hit in rec.get("fused_top3") or []:
+            path = hit.get("path")
+            if path:
+                dates_by_path.setdefault(_rel(path), set()).add(ts)
+    noms = {}
+    for path, dates in dates_by_path.items():
+        st = status_by_rel.get(path)
+        if st in ("captured", "candidate") and len(dates) >= promote_min:
+            noms[path] = {"status": st, "distinct_dates": sorted(dates)}
+    return noms
+
+
+def _gap_capture_clusters(gap_lines, min_repeat=2):
+    """all_miss queries repeated >= min_repeat times → 'worth capturing?' nominations.
+    Boring heuristic: normalized query string equality (no embeddings)."""
+    counts = {}
+    for rec in gap_lines:
+        if rec.get("fused_top3") == []:  # all-miss line: present but empty
+            q = (rec.get("query") or "").strip().lower()
+            if q:
+                counts[q] = counts.get(q, 0) + 1
+    return {q: n for q, n in counts.items() if n >= min_repeat}
+
+
+def _fold_cohorts(stale, fold_min=20):
+    """Fold machine-noise stale cohorts (same updated_date, count >= fold_min) into
+    one summary row each. Returns (folded_summaries, loose_items)."""
+    by_date = {}
+    for e in stale:
+        by_date.setdefault(e.get("updated_date") or "unknown", []).append(e)
+    folded, loose = [], []
+    for date, group in by_date.items():
+        if len(group) >= fold_min:
+            folded.append({"updated_date": date, "count": len(group)})
+        else:
+            loose.extend(group)
+    folded.sort(key=lambda x: -x["count"])
+    return folded, loose
+
+
+def cmd_consolidation_inbox(args) -> int:
+    """v2.0-alpha — weekly human-review inbox. Supersets stale-dedup with
+    exposure-driven promotion + gap-capture + cohort folding. Report-only:
+    never merges/deletes/archives. Vincent acts via `set-status`."""
+    try:
+        vault = _resolve_vault(args.vault)
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
+
+    scan_roots = args.scan or ["hermes-knowledge", "wiki"]
+    entities = _scan_entities(vault, scan_roots)
+    for e in entities:
+        e["path_rel"] = str(e["path"].relative_to(vault))
+
+    now = datetime.now().astimezone()
+    stale_cutoff = (now - timedelta(days=args.stale_days)).timestamp()
+    stale = []
+    for e in entities:
+        if e["status"] not in STATUS_LIVE:
+            continue
+        lt = e["mtime"]
+        if e["updated_date"]:
+            try:
+                ud = datetime.fromisoformat(e["updated_date"] + "T00:00:00").astimezone()
+                lt = max(lt, ud.timestamp())
+            except ValueError:
+                pass
+        if lt < stale_cutoff:
+            e["age_days"] = (now.timestamp() - lt) / 86400
+            stale.append(e)
+
+    by_key = {}
+    for e in entities:
+        key = (e["title"] or e["h1"] or "").strip().lower()
+        if key:
+            by_key.setdefault(key, []).append(e)
+    dups = [(k, v) for k, v in by_key.items() if len(v) >= 2]
+
+    gap_lines = _read_gap_log(args.gap_log)
+    noms = _promotion_nominations(gap_lines, entities, args.promote_min, vault=vault)
+    gap_caps = _gap_capture_clusters(gap_lines)
+    folded, loose_stale = _fold_cohorts(stale, args.cohort_fold_min)
+
+    date_str = now.strftime("%Y-%m-%d")
+    out_path = Path(args.output).expanduser() if args.output else \
+        vault / ".orp" / "reports" / f"consolidation-inbox-{date_str}.md"
+
+    L = [
+        f"# Consolidation Inbox — {now.strftime('%Y-%m-%d %H:%M %Z')}",
+        "",
+        "> Generated by `orp_reader.py consolidation-inbox` · v2.0-alpha",
+        f"> Scanned {len(entities)} entities · gap log: "
+        + (f"{len(gap_lines)} lines" if gap_lines else "(none)"),
+        "",
+        "_Review queue — not a lock. Act with `orp_reader.py set-status <path> <status>`._",
+        "",
+        f"## ⬆ Promotion nominations ({len(noms)})",
+        "_captured/candidate exposed in fused_top3 on >= %d distinct dates_" % args.promote_min,
+        "",
+    ]
+    if not noms:
+        L.append("(none)")
+    else:
+        for path, info in sorted(noms.items(), key=lambda x: -len(x[1]["distinct_dates"])):
+            L.append(f"- [[{path}]] · now `{info['status']}` · "
+                     f"exposed {len(info['distinct_dates'])}d ({', '.join(info['distinct_dates'][:5])})")
+            L.append(f"  → `orp_reader.py set-status {path} verified`")
+
+    L += ["", f"## 🕳 Gap-capture candidates ({len(gap_caps)})",
+          "_repeated all-miss queries — worth writing a note?_", ""]
+    if not gap_caps:
+        L.append("(none)")
+    else:
+        for q, n in sorted(gap_caps.items(), key=lambda x: -x[1])[:args.limit]:
+            L.append(f"- \"{q}\" · missed {n}×")
+
+    L += ["", f"## 🔁 Duplicate candidates ({len(dups)} groups)", ""]
+    if not dups:
+        L.append("(none)")
+    else:
+        dups.sort(key=lambda x: -len(x[1]))
+        for k, group in dups[:args.limit]:
+            L.append(f"### `{k}` ({len(group)} files)")
+            for e in group:
+                L.append(f"- [[{e['path_rel']}]] · status `{e['status']}`")
+            L.append("")
+
+    L += ["", f"## 🕰 Stale candidates ({len(loose_stale)} loose"
+          + (f" + {sum(f['count'] for f in folded)} folded" if folded else "") + ")", ""]
+    if folded:
+        L.append("**Folded cohorts (machine-noise, bulk-review):**")
+        for f in folded:
+            L.append(f"- {f['count']} entities all dated `{f['updated_date']}` "
+                     f"(likely a backfill cohort — review as a batch, not individually)")
+        L.append("")
+    if not loose_stale:
+        L.append("(no loose stale items)")
+    else:
+        loose_stale.sort(key=lambda x: x["age_days"], reverse=True)
+        for e in loose_stale[:args.limit]:
+            L.append(f"- [[{e['path_rel']}]] · status `{e['status']}` · age {e['age_days']:.0f}d")
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(L) + "\n", encoding="utf-8")
+
+    summary = {
+        "report_path": str(out_path),
+        "entities_scanned": len(entities),
+        "promotions": len(noms),
+        "gap_captures": len(gap_caps),
+        "dup_groups": len(dups),
+        "stale_loose": len(loose_stale),
+        "stale_folded_cohorts": len(folded),
+    }
+    if args.format == "json":
+        print(json.dumps(summary, indent=2, ensure_ascii=False))
+    else:
+        print(f"Inbox → {out_path}")
+        for k, v in summary.items():
+            if k != "report_path":
+                print(f"  {k}: {v}")
+    return 0
+
+
+def _inbox_is_stale(vault, max_age_days=7):
+    """True if no consolidation-inbox report exists, or the newest is older than
+    max_age_days. mtime-only stat — instant, safe for session-start."""
+    reports = vault / ".orp" / "reports"
+    if not reports.is_dir():
+        return True
+    latest = None
+    for p in reports.glob("consolidation-inbox-*.md"):
+        try:
+            m = p.stat().st_mtime
+        except OSError:
+            continue
+        if latest is None or m > latest:
+            latest = m
+    if latest is None:
+        return True
+    return (datetime.now().timestamp() - latest) > max_age_days * 86400
+
+
+def _inbox_pending_count(vault):
+    """Cheap pending-item count from the newest inbox (for the nudge line)."""
+    reports = vault / ".orp" / "reports"
+    files = sorted(reports.glob("consolidation-inbox-*.md")) if reports.is_dir() else []
+    if not files:
+        return 0
+    try:
+        txt = files[-1].read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return 0
+    n = 0
+    for line in txt.splitlines():
+        if line.startswith("- [[") or line.startswith("- \""):
+            n += 1
+    return n
+
+
+def cmd_inbox_check(args) -> int:
+    """v2.0-alpha anacron — session-start freshness gate. If the inbox is stale,
+    regenerate it DETACHED (non-blocking) and, if a report exists, print a nudge.
+    Cron-independent: cron-equipped deploys find it fresh and this no-ops.
+    Always exits 0 — never breaks session start."""
+    try:
+        vault = _resolve_vault(args.vault)
+    except Exception:
+        return 0
+    try:
+        if _inbox_is_stale(vault, args.max_age_days):
+            # single-flight guard: staleness only clears once the child WRITES the
+            # report, so rapid session starts would each spawn a duplicate scan
+            # racing on the same dated file. A self-expiring lock (mtime < 10min)
+            # lets exactly one regen run; a genuinely-needed later regen still fires
+            # (codex review P2).
+            lock = vault / ".orp" / "reports" / ".inbox-regen.lock"
+            fresh_lock = lock.is_file() and (datetime.now().timestamp() - lock.stat().st_mtime) < 600
+            if not fresh_lock:
+                lock.parent.mkdir(parents=True, exist_ok=True)
+                lock.write_text(str(datetime.now().timestamp()))
+                subprocess.Popen(
+                    ["python3", os.path.abspath(__file__), "consolidation-inbox",
+                     "--vault", str(vault)],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+                )
+        pending = _inbox_pending_count(vault)
+        if pending:
+            print(f"📥 consolidation-inbox: {pending} 项待审 "
+                  f"(.orp/reports/) — `orp_reader.py set-status` 批")
+    except Exception:
+        pass
     return 0
 
 
@@ -1162,6 +1543,52 @@ def main():
         help="stdout summary format (report markdown is always written)",
     )
     p_sd.set_defaults(func=cmd_stale_dedup_report)
+
+    # v2.0-alpha — human-gated status promotion ─────────────
+    p_ss = sub.add_parser(
+        "set-status",
+        help="Atomically set an entity's frontmatter status + auto-log a decision",
+    )
+    p_ss.add_argument("path", help="entity path (vault-relative or absolute)")
+    p_ss.add_argument("status", help=f"new status; one of {sorted(ALL_STATUS)}")
+    p_ss.add_argument("--agent", default="cc", help="agent id (default: cc)")
+    p_ss.add_argument("--vault", default=DEFAULT_VAULT_ROOT,
+                      help=f"vault root (default: {DEFAULT_VAULT_ROOT})")
+    p_ss.add_argument("--reason", help="optional one-line reason (appended to log)")
+    p_ss.set_defaults(func=cmd_set_status)
+
+    # v2.0-alpha — weekly consolidation inbox ──────────────
+    p_inbox = sub.add_parser(
+        "consolidation-inbox",
+        help="v2.0-alpha weekly review inbox (supersets stale-dedup + promotion + gap-capture)",
+    )
+    p_inbox.add_argument("--vault", default=DEFAULT_VAULT_ROOT,
+                         help=f"vault root (default: {DEFAULT_VAULT_ROOT})")
+    p_inbox.add_argument("--scan", action="append",
+                         help="vault-relative root to scan (repeatable; default: hermes-knowledge wiki)")
+    p_inbox.add_argument("--gap-log", default=DEFAULT_GAP_LOG,
+                         help=f"retrieval outcome log (default: {DEFAULT_GAP_LOG})")
+    p_inbox.add_argument("--stale-days", type=int, default=30, help="stale age threshold (default: 30)")
+    p_inbox.add_argument("--promote-min", type=int, default=2,
+                         help="distinct exposure dates before nominating promotion (default: 2)")
+    p_inbox.add_argument("--cohort-fold-min", type=int, default=20,
+                         help="fold same-date stale cohorts of >= this size (default: 20)")
+    p_inbox.add_argument("--limit", type=int, default=50, help="max items per section (default: 50)")
+    p_inbox.add_argument("--output", help="override report output path")
+    p_inbox.add_argument("--format", choices=["text", "json"], default="text",
+                         help="stdout summary format")
+    p_inbox.set_defaults(func=cmd_consolidation_inbox)
+
+    # v2.0-alpha — session-start anacron freshness gate ─────
+    p_ic = sub.add_parser(
+        "inbox-check",
+        help="v2.0-alpha anacron: regen consolidation-inbox if stale (detached) + nudge",
+    )
+    p_ic.add_argument("--vault", default=DEFAULT_VAULT_ROOT,
+                      help=f"vault root (default: {DEFAULT_VAULT_ROOT})")
+    p_ic.add_argument("--max-age-days", type=int, default=7,
+                      help="inbox older than this triggers regen (default: 7)")
+    p_ic.set_defaults(func=cmd_inbox_check)
 
     # Dogfood metrics (LOCAL FORK — Vincent's v1.4 evaluation tool)
     p_dogfood = sub.add_parser(
